@@ -203,5 +203,4 @@ machines/domains in it.
 
 ## License
 
-No license file is included yet — add one (MIT, Apache-2.0, etc.) before
-treating this as open source; until then all rights are reserved by default.
+MIT — see [LICENSE](LICENSE).
