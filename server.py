@@ -366,14 +366,98 @@ def _host_status(ssh, osname="darwin", mid=""):
 RAPL_ENERGY = "/sys/class/powercap/intel-rapl:0/energy_uj"
 RAPL_MAX = "/sys/class/powercap/intel-rapl:0/max_energy_range_uj"
 
-# Israel Electric Corp. flat residential tariff, August 2026:
-# 53.83 agorot/kWh + 17% VAT = 63.52 agorot = 0.6352 ILS per kWh.
-# Verify against your own bill — the rate is revised periodically, and a TAOZ
-# (time-of-use) plan prices peak hours very differently.
+# Electricity tariff: auto-detected from the system's timezone (best-effort,
+# no network call), falling back to a rough global average when detection
+# fails. Rates vary by provider/plan/season and this is at best a country
+# AVERAGE, so the frontend always shows a warning for an auto-detected rate
+# (never for one set explicitly below) — the fix is a "power" key in
+# config.json: {"kwh_price": 0.xx, "currency": "$", "tariff_note": "..."}.
 # The bill's fixed monthly charges are per-household, not caused by these
 # machines, so they are deliberately NOT added to the figures below.
-ILS_PER_KWH = 0.6352
-TARIFF_NOTE = "IEC tarifa fija · ago 2026 · IVA incl."  # UI shows the i18n copy (estNote, ES+EN in PAGE_M) — update all three together
+#
+# (price_per_kwh, currency_symbol, country_name) — rough 2025-ish residential
+# averages in LOCAL currency, deliberately approximate; extend as needed.
+_COUNTRY_TARIFFS = {
+    "IL": (0.65, "₪", "Israel"), "US": (0.16, "$", "United States"),
+    "GB": (0.28, "£", "United Kingdom"), "DE": (0.40, "€", "Germany"),
+    "FR": (0.23, "€", "France"), "ES": (0.25, "€", "Spain"),
+    "IT": (0.28, "€", "Italy"), "NL": (0.40, "€", "Netherlands"),
+    "PT": (0.24, "€", "Portugal"), "IE": (0.35, "€", "Ireland"),
+    "CA": (0.13, "$", "Canada"), "AU": (0.30, "$", "Australia"),
+    "JP": (26.0, "¥", "Japan"), "BR": (0.75, "R$", "Brazil"),
+    "IN": (7.0, "₹", "India"), "MX": (2.2, "$", "Mexico"),
+    "PL": (0.75, "zł", "Poland"), "SE": (1.8, "kr", "Sweden"),
+    "CH": (0.28, "CHF", "Switzerland"), "ZA": (2.3, "R", "South Africa"),
+}
+_TARIFF_DEFAULT = (0.20, "$", "unknown country")   # rough global-average fallback
+
+# IANA timezone -> ISO country code, covering only _COUNTRY_TARIFFS above.
+# Best-effort heuristic (a shared timezone can span countries); that's fine —
+# it only ever selects an already-approximate default, and always with the
+# "auto-detected, verify" warning attached.
+_TZ_COUNTRY = {
+    "Asia/Jerusalem": "IL", "Asia/Tel_Aviv": "IL",
+    "America/New_York": "US", "America/Chicago": "US", "America/Denver": "US",
+    "America/Los_Angeles": "US", "America/Phoenix": "US", "America/Anchorage": "US",
+    "Europe/London": "GB", "Europe/Berlin": "DE", "Europe/Paris": "FR",
+    "Europe/Madrid": "ES", "Europe/Rome": "IT", "Europe/Amsterdam": "NL",
+    "Europe/Lisbon": "PT", "Europe/Dublin": "IE",
+    "America/Toronto": "CA", "America/Vancouver": "CA",
+    "Australia/Sydney": "AU", "Australia/Melbourne": "AU", "Asia/Tokyo": "JP",
+    "America/Sao_Paulo": "BR", "Asia/Kolkata": "IN", "Asia/Calcutta": "IN",
+    "America/Mexico_City": "MX", "Europe/Warsaw": "PL", "Europe/Stockholm": "SE",
+    "Europe/Zurich": "CH", "Africa/Johannesburg": "ZA",
+}
+
+
+def _tz_name():
+    """'Asia/Jerusalem'-style zone name, best-effort across distros.
+
+    /etc/localtime -> zoneinfo symlink is the most portable source (works
+    even where Debian's convenience /etc/timezone file is absent, as on a
+    stock Debian install that only ever went through `timedatectl`); TZ env
+    and time.tzname (an ambiguous abbreviation like "IST") are last resorts.
+    """
+    try:
+        link = os.readlink("/etc/localtime")
+        if "zoneinfo/" in link:
+            tz = link.split("zoneinfo/", 1)[1]
+            for prefix in ("posix/", "right/"):
+                if tz.startswith(prefix):
+                    tz = tz[len(prefix):]
+            return tz
+    except Exception:
+        pass
+    try:
+        with open("/etc/timezone") as f:
+            return f.read().strip()
+    except Exception:
+        pass
+    return os.environ.get("TZ") or (time.tzname[0] if time.tzname else None)
+
+
+def _detect_country():
+    """Best-effort ISO country code from the system timezone. None on failure
+    or when the timezone isn't in _TZ_COUNTRY — never authoritative, always
+    just a starting point for _TARIFF_DEFAULT. Pure given its inputs."""
+    tz = _tz_name()
+    return _TZ_COUNTRY.get(tz) if tz else None
+
+
+def _tariff():
+    """(kwh_price, currency, note, auto) from config.json's "power" key, or
+    auto-detected from the system timezone. `auto` tells the frontend whether
+    to show the "verify this" warning — never true once the user has set an
+    explicit rate."""
+    p = _CFG.get("power") or {}
+    if p.get("kwh_price") is not None:
+        return (float(p["kwh_price"]), p.get("currency", "$"),
+                p.get("tariff_note", "manual rate (config.json)"), False)
+    price, currency, country = _COUNTRY_TARIFFS.get(_detect_country(), _TARIFF_DEFAULT)
+    return (price, currency, f"{country} average, auto-detected", True)
+
+
+KWH_PRICE, CURRENCY, TARIFF_NOTE, TARIFF_AUTO = _tariff()
 
 # Watts when we cannot measure. base = board+RAM+fans+PSU loss, cpu_max = the
 # chip's sustained draw at 100%, disks = spinning/idle drive draw.
@@ -726,12 +810,12 @@ def _energy_stats():
             first = con.execute("SELECT MIN(day) FROM days").fetchone()[0]
         finally:
             con.close()
-        r = ILS_PER_KWH
-        out = {"today_kwh": round(d_wh / 1000, 3), "today_ils": round(d_wh / 1000 * r, 2),
+        r = KWH_PRICE
+        out = {"today_kwh": round(d_wh / 1000, 3), "today_cost": round(d_wh / 1000 * r, 2),
                "today_hours": round(d_s / 3600, 1),
-               "month_kwh": round(m_wh / 1000, 2), "month_ils": round(m_wh / 1000 * r, 2),
+               "month_kwh": round(m_wh / 1000, 2), "month_cost": round(m_wh / 1000 * r, 2),
                "month_days": m_n,
-               "year_kwh": round(y_wh / 1000, 1), "year_ils": round(y_wh / 1000 * r, 2),
+               "year_kwh": round(y_wh / 1000, 1), "year_cost": round(y_wh / 1000 * r, 2),
                "year_days": y_n, "since": first}
         dim = calendar.monthrange(lt.tm_year, lt.tm_mon)[1]
         m_start = time.mktime((lt.tm_year, lt.tm_mon, 1, 0, 0, 0, 0, 0, -1))
@@ -744,9 +828,9 @@ def _energy_stats():
             proj_kwh = avg_w * 24 * dim / 1000.0
             out["month_avg_w"] = round(avg_w, 1)
             out["month_proj_kwh"] = round(proj_kwh, 1)
-            out["month_proj_ils"] = round(proj_kwh * r, 2)
+            out["month_proj_cost"] = round(proj_kwh * r, 2)
             out["year_proj_kwh"] = round(avg_w * 24 * 365.25 / 1000.0, 1)
-            out["year_proj_ils"] = round(avg_w * 24 * 365.25 / 1000.0 * r, 2)
+            out["year_proj_cost"] = round(avg_w * 24 * 365.25 / 1000.0 * r, 2)
         return out
     except Exception:
         return None
@@ -772,13 +856,13 @@ def _energy_loop():
 
 
 def _cost(watts):
-    """Watts held steady -> {day, month, year} in ILS, plus kWh/month."""
+    """Watts held steady -> {day, month, year} at KWH_PRICE, plus kWh/month."""
     if watts is None:
         return None
     kwh_day = watts * 24 / 1000.0
-    return {"day": round(kwh_day * ILS_PER_KWH, 2),
-            "month": round(kwh_day * 30.44 * ILS_PER_KWH, 2),
-            "year": round(kwh_day * 365.25 * ILS_PER_KWH, 2),
+    return {"day": round(kwh_day * KWH_PRICE, 2),
+            "month": round(kwh_day * 30.44 * KWH_PRICE, 2),
+            "year": round(kwh_day * 365.25 * KWH_PRICE, 2),
             "kwh_month": round(kwh_day * 30.44, 1),
             "kwh_year": round(kwh_day * 365.25, 1)}
 
@@ -1126,7 +1210,8 @@ def _build():
                       "hist": list(_pwr["hist"]),
                       "mhist": {k: list(v) for k, v in _pwr["mhist"].items()},
                       "every": PWR_EVERY,
-                      "rate": ILS_PER_KWH, "note": TARIFF_NOTE,
+                      "rate": KWH_PRICE, "currency": CURRENCY,
+                      "note": TARIFF_NOTE, "auto": TARIFF_AUTO,
                       "cost": _cost(total_w), "actual": _energy_stats(),
                       "offline": [mb["name"] for mb in machines
                                   if not (mb.get("host") or {}).get("online")]}}
@@ -2905,8 +2990,10 @@ const T={
   estBody:"Placa, discos y fuente están modelados a partir del hardware y del uso de CPU — no medidos. ",
   estRapl:"El término de CPU sí es una lectura real del contador RAPL. ",
   estSince:"Los totales MEDIDOS son vatios-hora acumulados desde ",
-  estTariff:"Tarifa",estNote:"IEC tarifa fija · ago 2026 · IVA incl.",
+  estTariff:"Tarifa",
   estFixed:"Los cargos fijos de la factura son del hogar y no se incluyen.",
+  tariffAutoHead:"TARIFA SIN CONFIRMAR",
+  tariffAutoBody:"detectada automáticamente por la zona horaria del sistema, no por tu factura real — corrígela con la clave \"power\" en config.json.",
   routeDown:"proceso activo · ruta pública caída",
   approxCpu:"CPU aproximada — derivada de la carga y el nº de núcleos, no medida",
   vExcellent:"EXCELENTE",vGood:"BIEN",vWatch:"VIGILAR",
@@ -2998,8 +3085,10 @@ const T={
   estBody:"Board, disks and PSU are modelled from the hardware and CPU load — not measured. ",
   estRapl:"The CPU term is a real reading from the RAPL counter. ",
   estSince:"MEASURED totals are watt-hours accumulated since ",
-  estTariff:"Tariff",estNote:"IEC fixed tariff · Aug 2026 · VAT incl.",
+  estTariff:"Tariff",
   estFixed:"The bill's fixed charges belong to the household and are excluded.",
+  tariffAutoHead:"UNCONFIRMED TARIFF",
+  tariffAutoBody:"auto-detected from the system's timezone, not your real bill — correct it with a \"power\" key in config.json.",
   routeDown:"process healthy · public route down",
   approxCpu:"CPU approximate — derived from load average and core count, not measured",
   vExcellent:"EXCELLENT",vGood:"GOOD",vWatch:"WATCH",
@@ -3065,7 +3154,8 @@ const upshort=u=>String(u||"—").replace(/(\d+)\s*y(ears?)?/,"$1y")
   .replace(/(\d+)\s*w(eeks?)?/,"$1w").replace(/(\d+)\s*d(ays?)?/,"$1d")
   .replace(/(\d+)\s*h(ours?)?/,"$1h").replace(/(\d+)\s*m(in(ute)?s?)?/,"$1m")
   .replace(/,/g,"").replace(/\s+/g,"");
-const ils=v=>v==null?"—":"₪"+v.toLocaleString(t("loc"),{minimumFractionDigits:2,maximumFractionDigits:2});
+let CUR="$";   // set from D.power.currency each time power() paints
+const money=v=>v==null?"—":CUR+v.toLocaleString(t("loc"),{minimumFractionDigits:2,maximumFractionDigits:2});
 // bytes/s -> 11.4M/s · 154K/s · 820B/s
 const rate=b=>b==null?"—":b>=1e6?(b/1e6).toFixed(1)+"M/s":b>=1e3?(b/1e3).toFixed(0)+"K/s":b+"B/s";
 const col=p=>p==null?"var(--dim)":p>=85?"var(--red)":p>=65?"var(--amber)":"var(--mint)";
@@ -3261,6 +3351,7 @@ function services(){
 // ================= 3 · CONSUMO =================
 function power(){
   const p=D.power||{},c=p.cost,s=D.summary||{};
+  CUR=p.currency||"$";
   const per=p.per||[],mine=per.find(x=>x.measured)||per[0];
   // per-machine chart series + legend: color by machine order, current W beside
   // each name ("—" while offline). The combined mint line stays as-is.
@@ -3285,20 +3376,20 @@ function power(){
   // A projection built from the RECORDED average beats extrapolating the current
   // reading: it ignores momentary spikes and tightens as the month accumulates.
   // Falls back to the instantaneous extrapolation until there is enough data.
-  const projM=a&&a.month_proj_ils!=null?a.month_proj_ils:null;
-  const projY=a&&a.year_proj_ils!=null?a.year_proj_ils:null;
+  const projM=a&&a.month_proj_cost!=null?a.month_proj_cost:null;
+  const projY=a&&a.year_proj_cost!=null?a.year_proj_cost:null;
   out+=`<div class="costs">`+
     `<div class="cost"><div class="lbl">${t("today")}</div>`+
-    `<div class="v">${a?ils(a.today_ils):"—"}</div>`+
+    `<div class="v">${a?money(a.today_cost):"—"}</div>`+
     `<div class="sub">${a?`${a.today_kwh.toFixed(2)} kWh · ${a.today_hours.toFixed(1)} h`:t("noRecord")}</div></div>`+
     `<div class="cost on"><div class="lbl">${t("month")}</div>`+
-    `<div class="v">${a?ils(a.month_ils):"—"}</div>`+
+    `<div class="v">${a?money(a.month_cost):"—"}</div>`+
     `<div class="sub">${a?`${a.month_kwh.toFixed(1)} kWh · ${a.month_days} ${a.month_days===1?t("day"):t("days")}`:t("noRecord")}`+
-    `${projM!=null?` · ${t("proj")} ${ils(projM)}`:(c?` · ${t("proj")} ${ils(c.month)}`:"")}</div>`+
+    `${projM!=null?` · ${t("proj")} ${money(projM)}`:(c?` · ${t("proj")} ${money(c.month)}`:"")}</div>`+
     `${a&&a.month_avg_w!=null?`<div class="sub">${t("avg")} ${a.month_avg_w.toFixed(0)}W · ${
       t("cover")} ${Math.round(a.coverage*100)}% ${t("ofMonth")}</div>`:""}</div>`+
     `<div class="cost"><div class="lbl">${t("year")}</div>`+
-    `<div class="v">${projY!=null?ils(projY):(c?ils(c.year):"—")}</div>`+
+    `<div class="v">${projY!=null?money(projY):(c?money(c.year):"—")}</div>`+
     `<div class="sub">${a&&a.year_kwh?`${a.year_kwh.toFixed(1)} ${t("soFar")}`:t("atRate")}</div></div></div>`;
 
   const wps=(p.watts!=null&&s.count)?(p.watts/s.count):null;
@@ -3312,8 +3403,12 @@ function power(){
     out+=`<div class="note"><b>${t("estHead")}</b>${t("estBody")}${
       per.some(x=>x.measured)?t("estRapl"):""}${
       p.actual&&p.actual.since?t("estSince")+esc(p.actual.since)+". ":""}`+
-      `${t("estTariff")} ${ils(p.rate)}/kWh · ${t("estNote")}. ${t("estFixed")}`+
+      `${t("estTariff")} ${money(p.rate)}/kWh · ${esc(p.note||"")}. ${t("estFixed")}`+
       (p.offline&&p.offline.length?` ${t("notCounted")}: ${esc(p.offline.join(", "))}.`:"")+`</div>`;
+  else
+    out+=`<div class="note">${t("estTariff")} ${money(p.rate)}/kWh · ${esc(p.note||"")}. ${t("estFixed")}</div>`;
+  if(p.auto)
+    out+=`<div class="note"><b>${t("tariffAutoHead")}</b>${t("tariffAutoBody")}</div>`;
   $("p-body").innerHTML=out;}
 
 // ================= 4 · SEGURIDAD =================
@@ -4408,6 +4503,26 @@ def _selftest():
         assert _events[-1]["title"] == f"t{EVENTS_LEN + 4}"   # newest kept
     finally:
         _events = _e_save
+
+    # --- electricity tariff: auto-detect (timezone) with a config.json override ---
+    assert set(_TZ_COUNTRY.values()) <= set(_COUNTRY_TARIFFS)  # no dangling country code
+    global _CFG
+    _cfg_save = _CFG
+    try:
+        _CFG = {"power": {"kwh_price": 0.5, "currency": "€", "tariff_note": "manual"}}
+        assert _tariff() == (0.5, "€", "manual", False)
+        _CFG = {"power": {"kwh_price": 0.9}}          # currency/note default when omitted
+        price, cur, note, auto = _tariff()
+        assert price == 0.9 and cur == "$" and auto is False
+        _CFG = {}                                     # no override -> auto-detected
+        price, cur, note, auto = _tariff()
+        assert auto is True and price > 0 and cur and "auto-detected" in note
+    finally:
+        _CFG = _cfg_save
+    # _cost()/_energy_stats() must scale with whatever KWH_PRICE actually loaded,
+    # not a value pinned in the test (that's env-dependent by design)
+    assert _cost(1000.0)["day"] == round(24 * KWH_PRICE, 2)
+    assert _cost(None) is None
 
     print("selftest ok")
 

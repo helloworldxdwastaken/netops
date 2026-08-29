@@ -83,6 +83,9 @@ Everything machine-specific lives in `config.json` (schema mirrored in
   "auth": {
     "user": "you",
     "salt_hex": "...", "hash_hex": "...", "iters": 200000
+  },
+  "power": {                                  // optional, see below
+    "kwh_price": 0.16, "currency": "$", "tariff_note": "flat residential rate"
   }
 }
 ```
@@ -103,6 +106,28 @@ Everything machine-specific lives in `config.json` (schema mirrored in
   falls back to a small built-in demo list so a fresh clone still runs.
 
 Point at a different config file with `NETOPS_CONFIG=/path/to/config.json`.
+
+### Electricity cost estimate
+
+The CONSUMO screen's cost figures need a price per kWh. Without a `"power"`
+key in `config.json`, this is **auto-detected** from the system's timezone
+(`/etc/localtime` → country → a built-in table of rough country-average
+residential rates) — no network call, and deliberately just a starting
+point: rates vary by provider/plan/season, so an auto-detected rate always
+shows an **"UNCONFIRMED TARIFF"** warning on the board until you set the
+real one. Look up your actual rate (from your bill) and add it to
+`config.json`:
+
+```jsonc
+"power": {
+  "kwh_price": 0.16,          // your currency, per kWh
+  "currency": "$",
+  "tariff_note": "flat residential rate, no time-of-use"
+}
+```
+
+That silences the warning and makes the cost figures accurate rather than a
+country-wide guess.
 
 ## Authentication
 

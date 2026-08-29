@@ -46,5 +46,12 @@
     "salt_hex": "REPLACE_ME",
     "hash_hex": "REPLACE_ME",
     "iters": 200000
+  },
+
+  "power": {
+    "_comment": "Optional. Without this key, the electricity cost estimate auto-detects a rough country-average rate from the system timezone and shows an UNCONFIRMED TARIFF warning on the board. Set your real rate here (from your actual bill) to silence that warning and get an accurate figure.",
+    "kwh_price": 0.16,
+    "currency": "$",
+    "tariff_note": "flat residential rate, no time-of-use"
   }
 }
