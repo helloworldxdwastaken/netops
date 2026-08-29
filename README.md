@@ -119,6 +119,51 @@ wrong.
 Rotate credentials any time by regenerating the hash (see [Quick start](#quick-start),
 step 2) and restarting.
 
+## Monitoring endpoint (for scripts / agents)
+
+`GET /api/alerts` is a read-only, session-authed endpoint for something
+other than a browser to poll — an AI agent, a cron job, whatever — to ask
+"is anything wrong right now" without scraping the dashboard HTML. It reuses
+the exact same problem-detection logic that already drives the ntfy/n8n push
+notifications (a service down, a machine offline, disk almost full, a
+disconnected drive, SMART health degrading, load/RAM/temp thresholds
+tripped, or the security screen — firewall/antivirus/patching/scan status,
+including scan results and infections), so anything that would page your
+phone shows up here too, whether or not ntfy/n8n are even configured.
+
+```
+GET /api/alerts
+GET /api/alerts?since=<unix ts>
+```
+
+Auth is the same session token as everything else — `POST /api/login` once,
+then send it as `X-Session: <token>` (or rely on the login cookie). Response:
+
+```jsonc
+{
+  "ok": false,                          // true iff problems is empty
+  "problems": [                         // everything currently bad, right now
+    "qbittorrent down",
+    "firewall down unit inactive"
+  ],
+  "events": [                           // recent transitions, newest first, capped at 100
+    {"ts": 1798765432.1, "title": "Lab alert", "body": "qbittorrent down",
+     "priority": "high", "tags": "rotating_light"}
+  ]
+}
+```
+
+`problems` is a live snapshot ("what's bad at this instant") — poll it for a
+quick health check. `events` is a log of state *changes* (each already
+deduplicated/debounced the same way the push notifications are — one entry
+per transition, not one per polling interval); pass `?since=<ts>` with the
+newest `ts` you've already seen to fetch only what's new. Nothing is pushed
+to a client from this endpoint — it's poll-only, which is deliberately the
+simplest thing that could work; if you want netops to call *out* to
+something instead, that's what the `data/n8n-feed.json` webhook path is for
+(see [Optional components](#optional-components) below), and the same
+`_n8n_event()` function that feeds `/api/alerts` already calls it.
+
 ## Optional components
 
 **Security screen** — `security_setup.sh` (run once with `sudo`) installs an

@@ -2077,8 +2077,24 @@ def _n8n_conf():
         return None
 
 
+EVENTS_LEN = 200
+_events = []   # recent alert-worthy events (newest last), for GET /api/alerts
+
+
+def _log_event(title, body, priority, tags):
+    _events.append({"ts": time.time(), "title": title, "body": body,
+                    "priority": priority, "tags": tags})
+    del _events[:-EVENTS_LEN]
+
+
 def _n8n_event(title, body, priority="default", tags=""):
-    """Route one notification through n8n; direct ntfy is the fallback."""
+    """Route one notification through n8n; direct ntfy is the fallback.
+
+    Every call is logged to _events regardless of delivery outcome — a dead
+    ntfy/n8n must not hide the underlying problem from /api/alerts, only from
+    the push channel.
+    """
+    _log_event(title, body, priority, tags)
     c = _n8n_conf()
     if c:
         try:
@@ -2322,6 +2338,32 @@ def _fleet_snapshot(data):
 # states that push as bad news, by severity; every other new state = recovery
 _BAD_HIGH = {"down", "offline", "missing", "replace_now", "full"}
 _BAD_WARN = {"degraded", "high", "low", "hot", "watch", "replace_soon"}
+_BAD_WORD = {"missing": "DISCONNECTED", "full": "almost full"}
+
+
+def _nice_key(k):
+    """'s/homeserver/qbittorrent' -> 'qbittorrent', 'mount:/media' -> '/media drive', ..."""
+    if k.startswith("m/"):
+        return k.split("/")[1] + " machine"
+    if k.startswith("s/"):
+        return k.split("/", 2)[2]
+    if k.startswith("mount:"):
+        return k.split(":", 1)[1] + " drive"
+    if k.startswith("disk:"):
+        return k.split(":", 1)[1] + " space"
+    if k.startswith("smart:"):
+        return k.split(":", 1)[1] + " SMART"
+    if k.startswith("sys:"):
+        return "system " + k.split(":", 1)[1]
+    return k
+
+
+def _fleet_problems(state):
+    """[str] terse description of every CURRENTLY bad key in a fleet-state
+    snapshot (not just what changed this cycle) — feeds /api/alerts. Pure."""
+    return [f"{_nice_key(k)} {_BAD_WORD.get(v, v)}"
+            for k, v in sorted((state or {}).items())
+            if v in _BAD_HIGH or v in _BAD_WARN]
 
 
 def _fleet_push(confirmed):
@@ -2335,29 +2377,12 @@ def _fleet_push(confirmed):
     """
     if not confirmed:
         return None
-
-    def nice(k):
-        if k.startswith("m/"):
-            return k.split("/")[1] + " machine"
-        if k.startswith("s/"):
-            return k.split("/", 2)[2]
-        if k.startswith("mount:"):
-            return k.split(":", 1)[1] + " drive"
-        if k.startswith("disk:"):
-            return k.split(":", 1)[1] + " space"
-        if k.startswith("smart:"):
-            return k.split(":", 1)[1] + " SMART"
-        if k.startswith("sys:"):
-            return "system " + k.split(":", 1)[1]
-        return k
-
-    WORD = {"missing": "DISCONNECTED", "full": "almost full"}
     bad = [(k, b) for k, (a, b) in sorted(confirmed.items())
            if b in _BAD_HIGH or b in _BAD_WARN]
     good = [(k, b) for k, (a, b) in sorted(confirmed.items())
             if b not in _BAD_HIGH and b not in _BAD_WARN]
-    lines = [f"{nice(k)} {WORD.get(b, b)}" for k, b in bad]
-    lines += [f"{nice(k)} " + ("back online" if k.startswith("m/") else
+    lines = [f"{_nice_key(k)} {_BAD_WORD.get(b, b)}" for k, b in bad]
+    lines += [f"{_nice_key(k)} " + ("back online" if k.startswith("m/") else
               "back up" if k.startswith("s/") else "recovered")
               for k, b in good]
     worst = ("down" if any(b in _BAD_HIGH for _, b in bad)
@@ -2370,39 +2395,44 @@ def _fleet_push(confirmed):
              "up": "white_check_mark"}[worst])
 
 
+_fleet_state = None   # current key -> state, mirrors _svc_loop's debounced
+                      # view; read by /api/alerts as "what's bad right now"
+
+
 def _svc_loop():
-    last, pend = None, {}
+    global _fleet_state
+    pend = {}
     while True:
         try:
             data = get_data()
             snap = _fleet_snapshot(data)
             snap.update(_health_states(*_local_health(data)))
-            if last is None:
-                last = snap        # boot baseline: never re-announce old news
+            if _fleet_state is None:
+                _fleet_state = snap        # boot baseline: never re-announce old news
             else:
                 confirmed = {}
                 for k, st in snap.items():
-                    if k not in last:
+                    if k not in _fleet_state:
                         # new or RESURRECTED key (e.g. services hidden during a
                         # one-tick machine flap): baseline silently. Treating
                         # None->state as news replayed old, already-announced
                         # states as a "Recovered"/alert storm (adversarial
                         # review F1) — the machine line carries that news.
-                        last[k] = st
+                        _fleet_state[k] = st
                         pend.pop(k, None)
                         continue
-                    if st == last.get(k):
+                    if st == _fleet_state.get(k):
                         pend.pop(k, None)
                         continue
                     s0, n = pend.get(k, (None, 0))
                     n = n + 1 if s0 == st else 1
                     pend[k] = (st, n)
                     if n >= 2:
-                        confirmed[k] = (last.get(k), st)
-                        last[k] = st
+                        confirmed[k] = (_fleet_state.get(k), st)
+                        _fleet_state[k] = st
                         pend.pop(k, None)
-                for k in [k for k in last if k not in snap]:   # catalog edits
-                    last.pop(k, None)
+                for k in [k for k in _fleet_state if k not in snap]:   # catalog edits
+                    _fleet_state.pop(k, None)
                     pend.pop(k, None)
                 note = _fleet_push(confirmed)
                 if note:
@@ -3738,6 +3768,20 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json", nostore)
         elif self.path.startswith("/api/logs"):
             return self._logs()
+        elif self.path.startswith("/api/alerts"):
+            if not self._authed():
+                return self._send(401, b"auth required", "text/plain", nostore)
+            problems = _sec_summary(_sec["v"]) + _fleet_problems(_fleet_state)
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                since = float(qs.get("since", ["0"])[0])
+            except ValueError:
+                since = 0.0
+            events = sorted((e for e in _events if e["ts"] > since),
+                            key=lambda e: e["ts"], reverse=True)[:100]
+            self._send(200, json.dumps({"ok": not problems, "problems": problems,
+                                        "events": events}).encode(),
+                       "application/json", nostore)
         elif self.path.startswith("/api/job"):
             if not self._authed():
                 return self._send(401, b"auth required", "text/plain", nostore)
@@ -4342,6 +4386,28 @@ def _selftest():
     _n = _alert_transition(_bad, _w)
     assert _n and _n[2] == "default" and "patching" in _n[1]
     assert _alert_transition(None, _bad) is not None    # restart mid-incident
+
+    # --- /api/alerts: current-problems snapshot + the event log it reads ---
+    assert _nice_key("m/homeserver") == "homeserver machine"
+    assert _nice_key("s/homeserver/qbittorrent") == "qbittorrent"
+    assert _nice_key("mount:/media") == "/media drive"
+    assert _nice_key("disk:/") == "/ space"
+    assert _fleet_problems(None) == []
+    _fp = _fleet_problems({"m/homeserver": "offline", "s/homeserver/x": "up",
+                           "disk:/": "full", "sys:load": "ok"})
+    assert _fp == ["/ space almost full", "homeserver machine offline"]
+    global _events
+    _e_save = _events
+    try:
+        _events = []
+        _log_event("t1", "b1", "high", "warning")
+        assert len(_events) == 1 and _events[0]["title"] == "t1"
+        for i in range(EVENTS_LEN + 5):        # ring buffer caps at EVENTS_LEN
+            _log_event(f"t{i}", "b", "default", "")
+        assert len(_events) == EVENTS_LEN
+        assert _events[-1]["title"] == f"t{EVENTS_LEN + 4}"   # newest kept
+    finally:
+        _events = _e_save
 
     print("selftest ok")
 
