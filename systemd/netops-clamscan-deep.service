@@ -1,0 +1,12 @@
+# Installed to /etc/systemd/system/ by security_setup.sh.
+[Unit]
+Description=Weekly full ClamAV sweep (downloads + home + /etc) for the netops board
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tokyo
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=12h
+ExecStart=/usr/bin/python3 /home/tokyo/netops/security_scan.py --deep

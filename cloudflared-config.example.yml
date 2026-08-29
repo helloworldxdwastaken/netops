@@ -1,0 +1,28 @@
+# Example cloudflared config for exposing netops (and anything else on this
+# box) through a Cloudflare Tunnel — no port-forwarding, no public IP exposed.
+#
+# Copy this to cloudflared-config-ntfy.yml (or wherever your
+# /etc/cloudflared/config.yml points), fill in your own tunnel ID and
+# hostnames, and never commit the filled-in version — it's already gitignored
+# here for that reason.
+#
+# Get a tunnel ID + credentials file with:
+#   cloudflared tunnel login
+#   cloudflared tunnel create <name>
+#
+# Always target 127.0.0.1, never `localhost` — some systems resolve
+# `localhost` to ::1 first and cloudflared won't fall back to IPv4.
+
+tunnel: REPLACE-WITH-YOUR-TUNNEL-ID
+credentials-file: /home/YOU/.cloudflared/REPLACE-WITH-YOUR-TUNNEL-ID.json
+
+ingress:
+  # netops itself
+  - hostname: status.example.com
+    service: http://127.0.0.1:8787
+  # add one block per service you want public; anything not listed here
+  # simply isn't reachable from outside your network
+  - hostname: app.example.com
+    service: http://127.0.0.1:3000
+  # required catch-all — must be the last entry
+  - service: http_status:404

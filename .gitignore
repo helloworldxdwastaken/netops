@@ -1,0 +1,20 @@
+__pycache__/
+data/
+*.bak-*
+*.log
+*.pyc
+
+# Real, machine-specific config (domains, SSH targets, login credentials).
+# Copy config.example.json -> config.json and edit it; never commit config.json.
+config.json
+
+# Real Cloudflare tunnel config (tunnel ID + real hostnames). Copy
+# cloudflared-config.example.yml and edit it for your own tunnel.
+cloudflared-config-ntfy.yml
+
+# Claude Code's per-project operational memory: a running journal of this
+# specific deployment (real IPs, hostnames, incident notes). Not for publishing.
+PROJECT_MEMORY.md
+
+# Stray build artifacts that shouldn't be tracked even if regenerated.
+server.py.new

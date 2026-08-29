@@ -1,0 +1,50 @@
+{
+  "_comment": "Copy this file to config.json (gitignored, never committed) and edit it for your setup. See README.md for the full field reference.",
+
+  "title": "NETOPS // HOMELAB DASHBOARD",
+
+  "machines": [
+    {
+      "id": "local",
+      "name": "HOMESERVER",
+      "role": "APPS NODE",
+      "ssh": null,
+      "os": "linux",
+      "catalog": [
+        {
+          "name": "My Web App",
+          "cat": "APPS",
+          "match": ["my-web-app"],
+          "url": "app.example.com"
+        },
+        {
+          "name": "Some Native Service",
+          "cat": "INFRA & DATOS",
+          "port": 8080
+        }
+      ]
+    },
+    {
+      "id": "workstation",
+      "name": "WORKSTATION",
+      "role": "REMOTE NODE",
+      "ssh": "youruser@100.x.x.x",
+      "os": "linux",
+      "catalog": [
+        {
+          "name": "Ollama",
+          "cat": "IA & AGENTES",
+          "port": 11434
+        }
+      ]
+    }
+  ],
+
+  "auth": {
+    "_comment": "Generate with: python3 -c \"import hashlib,os,json; s=os.urandom(16); print(json.dumps({'user':'you','salt_hex':s.hex(),'hash_hex':hashlib.pbkdf2_hmac('sha256',b'<newpass>',s,200000).hex(),'iters':200000}))\"",
+    "user": "admin",
+    "salt_hex": "REPLACE_ME",
+    "hash_hex": "REPLACE_ME",
+    "iters": 200000
+  }
+}

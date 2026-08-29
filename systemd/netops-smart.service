@@ -1,0 +1,13 @@
+# OPTIONAL root-installed alternative to the `crontab -l` entry.
+#   sudo cp /home/tokyo/netops/systemd/netops-smart.* /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now netops-smart.timer
+#   crontab -l | grep -v smart_cron.sh | crontab -   # then drop the cron lines
+[Unit]
+Description=Collect SMART drive health for the netops board
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=tokyo
+ExecStart=/usr/bin/python3 /home/tokyo/netops/smart_collect.py

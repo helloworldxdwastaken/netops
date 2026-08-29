@@ -1,0 +1,12 @@
+# Mon-Sat on purpose: Sunday belongs to netops-clamscan-deep.timer, so two
+# clamscans (1.2 GB of signatures each) are never resident at once.
+[Unit]
+Description=Daily ClamAV sweep (recent files) for the netops board
+
+[Timer]
+OnCalendar=Mon..Sat *-*-* 04:15:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
