@@ -18,3 +18,8 @@ PROJECT_MEMORY.md
 
 # Stray build artifacts that shouldn't be tracked even if regenerated.
 server.py.new
+
+# Sanitisation writeup: it documents what was removed BY QUOTING the real
+# values (ssh targets, tailnet IPs, domain, a live vuln note), so it must never
+# be published. Kept locally for reference.
+PUBLISHING_GUIDE.md
