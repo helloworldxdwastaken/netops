@@ -2685,6 +2685,10 @@ a{color:inherit;text-decoration:none}
 .ns-flow.s2{animation-duration:1.4s}
 .ns-flow.s3{animation-duration:.7s}
 .ns-dead{stroke-dasharray:4 9;opacity:.4}
+/* Direction is not decoration here: it says WHO DIALS. cloudflared and the
+   remote tunnels open the connection outward, so their dashes must travel away
+   from the internet; only the exposed ports are genuinely inbound. */
+.ns-out{animation-direction:reverse}
 @keyframes nspulse{0%,100%{opacity:1}50%{opacity:.45}}
 .ns-pulse{animation:nspulse 2.2s ease-in-out infinite}
 @media (prefers-reduced-motion:reduce){
@@ -3058,6 +3062,8 @@ const T={
   nsDocker:"docker",nsSvc:"servicios",nsCtn:"contenedores",
   nsOwnPath:"salida propia a internet",nsViaMesh:"solo por la malla",
   nsNoHub:"ninguna máquina local",nsDown:"bajada",nsUp:"subida",nsPorts:"puertos",
+  nsDirIn:"entrante →",nsDirOut:"← saliente (lo abre el servidor)",
+  nsDirP2P:"↔ entre pares",
   vReplaceSoon:"CAMBIAR PRONTO",vReplaceNow:"CAMBIAR YA",
   io:"E/S",avg:"media",cover:"cobertura",ofMonth:"del mes",
   noData:"sin dato",screens:"Pantallas",
@@ -3162,6 +3168,8 @@ const T={
   nsDocker:"docker",nsSvc:"services",nsCtn:"containers",
   nsOwnPath:"own internet egress",nsViaMesh:"via mesh only",
   nsNoHub:"no local machine",nsDown:"down",nsUp:"up",nsPorts:"ports",
+  nsDirIn:"inbound →",nsDirOut:"← outbound (server dials out)",
+  nsDirP2P:"↔ peer-to-peer",
   vReplaceSoon:"REPLACE SOON",vReplaceNow:"REPLACE NOW",
   io:"I/O",avg:"avg",cover:"coverage",ofMonth:"of the month",
   noData:"no data",screens:"Screens",
@@ -3743,13 +3751,16 @@ function netBuild(o){
   // nftables. Routed ABOVE the barrier and labelled, because the old diagram drew
   // it straight through the wall and implied the opposite.
   s+=`<path d="M190 300 C300 300 300 96 470 96 L700 96 L700 150" fill="none"
-      stroke="url(#${gid})" stroke-width="2" class="${dnCls}"/>`;
+      stroke="url(#${gid})" stroke-width="2" class="${dnCls} ns-out"/>`;
   s+=`<text x="492" y="84" fill="#a78bfa" class="nsl">${esc(t("nsBypass"))}</text>`;
+  s+=`<text x="492" y="70" fill="#6f8c86" class="nsl">${esc(t("nsDirOut"))}</text>`;
   // exposed path: the ports that really do face the internet, through the barrier
   s+=nsEdge(190,320,470,300,fwOk?"#5df2a0":"#ff6b6b",upCls,0);
   s+=nsEdge(548,300,700,300,fwOk?"#5df2a0":"#ff6b6b","ns-flow s1",0);
+  s+=`<text x="196" y="308" fill="#6f8c86" class="nsl">${esc(t("nsDirIn"))}</text>`;
   // mesh spine
   s+=nsEdge(190,360,300,470,"#67e8f9","ns-flow s1",0);
+  s+=`<text x="196" y="374" fill="#6f8c86" class="nsl">${esc(t("nsDirP2P"))}</text>`;
   o.others.forEach((z,i)=>{const on=(z.m.host||{}).online,y=140+i*160,cy=y+52;
     // under the hub, never through it
     s+=`<path d="M420 505 C640 562 820 566 958 566 L958 ${cy+16} Q958 ${cy} 980 ${cy}"
@@ -3760,7 +3771,7 @@ function netBuild(o){
     if(z.own.length){const lane=1178+i*8,top=16+i*11;
       s+=`<path d="M115 262 C115 44 700 ${top} ${lane} ${top} L${lane} ${cy} L1170 ${cy}"
         fill="none" stroke="#a78bfa" stroke-width="1.6"
-        class="${on?"ns-flow s2":"ns-dead"}"/>`;}});
+        class="${on?"ns-flow s2 ns-out":"ns-dead"}"/>`;}});
   // ---- nodes ----
   s+=nsNode(40,262,150,76,t("nsNet"),[{t:t("nsPublic")}],"#8fa9a2");
   s+=nsNode(250,58,220,76,t("nsTunnel"),
