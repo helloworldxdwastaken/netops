@@ -53,5 +53,11 @@
     "kwh_price": 0.16,
     "currency": "$",
     "tariff_note": "flat residential rate, no time-of-use"
+  },
+
+  "arr": {
+    "_comment": "Optional. Adds a 'library' button that lists what Sonarr/Radarr have on disk, largest first, and deletes an item plus its files AND its qBittorrent torrent (so hardlinked downloads actually free the space). Omit this key and the button never appears. Get each api_key from that app's Settings -> General -> Security. Deleting is restricted to local-network requests; browsing works anywhere.",
+    "sonarr": {"url": "http://127.0.0.1:8989", "api_key": "REPLACE_ME"},
+    "radarr": {"url": "http://127.0.0.1:7878", "api_key": "REPLACE_ME"}
   }
 }

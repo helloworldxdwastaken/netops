@@ -129,6 +129,43 @@ real one. Look up your actual rate (from your bill) and add it to
 That silences the warning and makes the cost figures accurate rather than a
 country-wide guess.
 
+### Media library cleanup (Sonarr/Radarr)
+
+Optional. With an `"arr"` key in `config.json`, the SERVICIOS screen grows a
+**library** button: it lists what Sonarr and Radarr have on disk, largest
+first, so the things eating your space are at the top — and deletes one
+cleanly.
+
+```jsonc
+"arr": {
+  "sonarr": {"url": "http://127.0.0.1:8989", "api_key": "..."},
+  "radarr": {"url": "http://127.0.0.1:7878", "api_key": "..."}
+}
+```
+
+Each `api_key` comes from that app's own **Settings → General → Security**.
+Omit the key entirely and the button never appears.
+
+Deleting removes the item and its files through Sonarr/Radarr (which also
+stops them monitoring it, so nothing silently re-downloads) **and** then
+removes the matching qBittorrent torrent. That second step matters: with the
+usual hardlinked setup, the download and the library file are the same disk
+blocks under two names, so deleting only the library copy frees nothing. The
+torrent is matched by `(device, inode)`, and is only removed when *every*
+file in it is part of what you deleted — a pack that also holds media you
+are keeping is left alone (the response then reports `torrents_cleaned: 0`,
+so you know to look at qBittorrent yourself).
+
+Two things worth knowing:
+
+- **Deleting is local-network only.** `POST /api/library/delete` refuses with
+  `403` on anything arriving through the public tunnel, session or not, so
+  the destructive action is not reachable from the internet. Browsing the
+  list (`GET /api/library?app=radarr|sonarr`) works from anywhere, like every
+  other read.
+- **Sonarr deletes a whole series**, not single episodes — that's how Sonarr
+  itself models a delete.
+
 ## Authentication
 
 The board is meant to be safe to put behind a public tunnel (Cloudflare

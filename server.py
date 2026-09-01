@@ -465,7 +465,7 @@ KWH_PRICE, CURRENCY, TARIFF_NOTE, TARIFF_AUTO = _tariff()
 POWER_MODEL = {
     "homeserver": {"base": 14.0, "cpu_max": 35.0, "disks": 4.0},
     "tokyo":      {"base": 12.0, "cpu_max": 60.0, "disks": 1.0},
-    "noxair":     {"base": 8.0,  "cpu_max": 15.0, "disks": 1.0},
+    "macair":     {"base": 8.0,  "cpu_max": 15.0, "disks": 1.0},
 }
 _POWER_DEFAULT = {"base": 12.0, "cpu_max": 30.0, "disks": 1.0}
 
@@ -1129,7 +1129,12 @@ def _collect_categories(catalog, docker, ssh, osname="darwin", http=None, outdat
 def _build_machine(m, http=None):
     """One machine -> {id,name,role,host,categories,summary}. Never raises."""
     empty = {"online": 0, "degraded": 0, "down": 0, "count": 0, "ram": "0B", "ram_bytes": 0}
-    base = {"id": m["id"], "name": m["name"], "role": m["role"]}
+    # "local" is authoritative: LOCAL_ID stamps ssh=None on the machine netops
+    # runs on. The topology used to find the hub with /home/i.test(id), which
+    # picks the wrong box the moment a machine is renamed or another id merely
+    # contains "home".
+    base = {"id": m["id"], "name": m["name"], "role": m["role"],
+            "local": m.get("ssh") is None}
     host = _host_status(m["ssh"], m.get("os", "darwin"), m["id"])
     if not host["online"]:
         return {**base, "host": {"online": False}, "categories": [], "summary": dict(empty)}
@@ -1214,7 +1219,8 @@ def _build():
                       "note": TARIFF_NOTE, "auto": TARIFF_AUTO,
                       "cost": _cost(total_w), "actual": _energy_stats(),
                       "offline": [mb["name"] for mb in machines
-                                  if not (mb.get("host") or {}).get("online")]}}
+                                  if not (mb.get("host") or {}).get("online")]},
+            "library_apps": [a for a in _ARR_APPS if _arr_conf(a)]}
 
 
 # (t, data) as ONE tuple so a reader can never pair one thread's data with
@@ -2391,12 +2397,21 @@ def _local_health(data):
             used[p] = res[p]
     try:
         for b in _smart_blocks():
-            if b.get("mid") != LOCAL_ID:
-                continue
+            mid = b.get("mid")
             for d in (b.get("drives") or []):
                 v, nm = d.get("verdict"), d.get("name") or d.get("dev")
-                if v and nm:
-                    smart[str(nm)] = str(v)
+                # "unknown" means we have no health data (a remote drive with no
+                # root for smartctl) - never alert on the absence of a signal
+                if v and nm and v != "unknown":
+                    key = str(nm) if mid == LOCAL_ID else f"{mid}:{nm}"
+                    smart[key] = str(v)
+                # capacity IS measurable for remote drives even without SMART, and
+                # a filling disk is the failure that actually arrives first. Local
+                # mounts stay with the WATCH_MOUNTS probe above; this adds every
+                # other reporting host.
+                pct, use = d.get("used_pct"), d.get("use")
+                if mid != LOCAL_ID and pct is not None and use:
+                    used[f"{mid}:{use}"] = pct
     except Exception:
         pass
     return load5, ncpu, ram, temp, mounts, used, smart
@@ -2650,6 +2665,32 @@ a{color:inherit;text-decoration:none}
   font:600 9.5px/1 var(--mono);letter-spacing:1.2px;padding:7px 9px;cursor:pointer}
 .tb:hover{color:var(--mint);border-color:var(--mint2)}
 
+/* ---------- 5 · RED (network surface) ---------- */
+.nswrap{width:100%;overflow-x:auto;padding:6px 0 2px}
+.nswrap svg{display:block;width:100%;min-width:760px;height:auto}
+.nsleg{margin:2px 4px 0;font:600 10.5px var(--mono);letter-spacing:.9px;color:var(--dim)}
+.nst{font:700 12px var(--mono);letter-spacing:2px}
+.nsh{font:700 14px var(--mono);letter-spacing:2.4px}
+.nss{font:400 11px var(--mono)}
+.nsv{font:700 12px var(--mono)}
+.nsl{font:400 10px var(--mono)}
+.nsfw{font:700 12px var(--mono);letter-spacing:3px}
+.nsn.off rect{stroke-dasharray:5 4}
+/* One shared keyframe; speed is picked from a SMALL set of classes rather than a
+   continuously-varying duration, because changing animation-duration rescales a
+   running animation's progress and makes the dashes visibly jump. */
+@keyframes nsflow{to{stroke-dashoffset:-32}}
+.ns-flow{stroke-dasharray:5 11;animation:nsflow 2.4s linear infinite}
+.ns-flow.s1{animation-duration:2.6s}
+.ns-flow.s2{animation-duration:1.4s}
+.ns-flow.s3{animation-duration:.7s}
+.ns-dead{stroke-dasharray:4 9;opacity:.4}
+@keyframes nspulse{0%,100%{opacity:1}50%{opacity:.45}}
+.ns-pulse{animation:nspulse 2.2s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){
+  .ns-flow,.ns-pulse{animation:none}
+  .ns-flow{stroke-dasharray:none}}
+
 /* ---------- screens ---------- */
 .screens{flex:1;display:flex;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;
   scroll-behavior:smooth;-webkit-overflow-scrolling:touch;scrollbar-width:none}
@@ -2722,6 +2763,8 @@ a{color:inherit;text-decoration:none}
 .dk .dv.up{color:var(--mint);background:rgba(93,242,160,.1);border:1px solid rgba(93,242,160,.3)}
 .dk .dv.deg{color:var(--amber);background:rgba(245,181,68,.1);border:1px solid rgba(245,181,68,.35)}
 .dk .dv.down{color:var(--red);background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3)}
+.dk .dv.na{color:var(--dim);background:rgba(143,169,162,.08);border:1px solid var(--line2)}
+.sv .d.na,.dk .d.na{color:var(--dim)}
 .hd{display:flex;align-items:baseline;gap:9px}
 .hd .r{margin-left:auto;font-weight:600;font-size:9.5px;letter-spacing:1.4px;color:var(--dim)}
 .hd .r.old{color:var(--amber)}
@@ -2741,8 +2784,6 @@ a{color:inherit;text-decoration:none}
 .clg{display:flex;align-items:center;gap:5px;font:600 10px/1 var(--mono);
   letter-spacing:1px;color:var(--txt2)}
 .clg i{width:8px;height:8px;border-radius:2px;flex:none}
-.tmap{padding:10px 4px 2px;overflow-x:auto}
-.tmap svg{display:block;min-width:960px;width:100%;height:auto}
 .prows{columns:2 320px;column-gap:26px;padding-top:4px}
 .prow{break-inside:avoid}
 .sv .act{border:1px solid var(--line2);background:transparent;color:var(--dim);
@@ -2772,6 +2813,10 @@ dialog{border:1px solid var(--line2);border-radius:14px;background:var(--card);c
   padding:0;margin:auto;max-width:min(430px,92vw);font-family:var(--mono)}
 dialog.wide{max-width:min(900px,94vw)}
 dialog.wide .logsv{margin:10px 16px 2px}
+.libwrap{max-height:56vh;overflow-y:auto;margin:6px 16px 10px}
+table.libt{width:100%;border-collapse:collapse;font-size:.92rem}
+table.libt td{padding:7px 6px;border-bottom:1px solid var(--line2)}
+table.libt td.r{text-align:right;white-space:nowrap;color:var(--dim);padding-right:12px}
 dialog::backdrop{background:rgba(3,6,7,.76);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
 .dh{font:700 11px var(--mono);letter-spacing:1.8px;text-transform:uppercase;color:var(--dim);padding:17px 19px 0}
 .db{padding:10px 19px 4px;font:400 13.5px/1.55 var(--mono);color:var(--txt2)}
@@ -2917,6 +2962,7 @@ dialog::backdrop{background:rgba(3,6,7,.76);-webkit-backdrop-filter:blur(3px);ba
     <section class="screen" id="sc1"><div id="s-body"></div></section>
     <section class="screen" id="sc2"><div id="p-body"></div></section>
     <section class="screen" id="sc3"><div id="x-body"></div></section>
+    <section class="screen" id="sc4"><div id="n-body"></div><div class="nsleg" id="n-legend"></div></section>
   </div>
 
   <button class="nav l" id="prev">&lsaquo;</button>
@@ -2938,20 +2984,14 @@ $("logo").innerHTML=BRAND.replace(/\/\//,"<i>//</i>");
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const short=n=>String(n).split("·")[0].trim();
 const SPINE=["#5df2a0","#67e8f9","#a78bfa","#f5b544","#f472b6","#2dd4bf"];
-const GLY={up:"●",degraded:"▲",down:"✕"};
+const GLY={up:"●",degraded:"▲",down:"✕",na:"○"};
 const WORD=()=>({up:t("wUp"),degraded:t("wDeg"),down:t("wDown")});
 const nword=(n,k)=>t(n===1?k+"1":k);   // singular/plural status words
 // ---- i18n. Every visible string lives here; nothing is hardcoded in a view.
 // Disk verdicts and timestamps are worded here too (the server sends the raw
 // verdict key and an age in seconds) so switching language re-labels them.
 const T={
- es:{sc:["VITALES","SERVICIOS","CONSUMO","SEGURIDAD"],
-  tpTun:"TÚNEL CLOUDFLARE",tpHostsN:n=>`${n} hostnames públicos`,
-  tpMesh:"TAILSCALE",tpMeshSub:"malla WireGuard · 100.x",
-  tpLan:"LAN",tpLanIso:"clientes aislados por el router",
-  tpFwSub:n=>`drop por defecto · ${n} reglas`,tpBlockedN:n=>`${n} pkt bloqueados`,
-  tpOpen:"abiertos",tpLanOnly:"solo LAN",tpBlk:"bloqueados",
-  tpLoop:"localhost",tpDocker:"docker",tpCtn:"contenedores",
+ es:{sc:["VITALES","SERVICIOS","CONSUMO","SEGURIDAD","RED"],
   cpu:"CPU",mem:"MEMORIA",temp:"TEMPERATURA",net:"RED",thermal:"TÉRMICA",
   svcOnline:"SERVICIOS ONLINE",system:"SISTEMA",disks:"DISCOS",fleet:"FLOTA",
   uptime:"UPTIME",load:"CARGA",memf:"MEM",disk:"DISCO",containers:"CONTENEDORES",
@@ -2980,6 +3020,13 @@ const T={
   rstAsk:n=>`¿Reiniciar ${n}? El servicio se detendrá y arrancará de nuevo.`,
   rstDone:n=>`${n} reiniciado`,logsBtn:"logs",close:"cerrar",
   srvBusyOp:"ya hay una operación en curso sobre este servicio",
+  libBtn:"biblioteca",libRadarr:"películas",libSonarr:"series",
+  libLoading:"cargando…",libEmpty:"nada aquí",libDelete:"eliminar",
+  libDelTitle:"eliminar definitivamente",
+  libDelAsk:n=>`¿Eliminar "${n}" y sus archivos? Esto no se puede deshacer.`,
+  libDelOk:"eliminar",libDeleted:n=>`liberado ${n}`,
+  libTorrentCleaned:"torrent también eliminado",
+  libLocalOnly:"solo disponible en la red local",
   st:{preparing:"preparando…",locating:"localizando contenedor…",pulling:"descargando imagen…",
       pulled:"imagen descargada",recreating:"recreando contenedor…",starting:"arrancando servicio…",
       stopping:"deteniendo el anterior…",uptodate:"ya estaba al día",done:"listo",failed:"error"},
@@ -2996,7 +3043,15 @@ const T={
   tariffAutoBody:"detectada automáticamente por la zona horaria del sistema, no por tu factura real — corrígela con la clave \"power\" en config.json.",
   routeDown:"proceso activo · ruta pública caída",
   approxCpu:"CPU aproximada — derivada de la carga y el nº de núcleos, no medida",
-  vExcellent:"EXCELENTE",vGood:"BIEN",vWatch:"VIGILAR",
+  vExcellent:"EXCELENTE",vGood:"BIEN",vWatch:"VIGILAR",vUnknown:"SIN DATOS",
+  nsTitle:"Superficie de red",nsNet:"INTERNET",nsPublic:"red pública",
+  nsTunnel:"TÚNEL CLOUDFLARE",nsMesh:"MALLA TAILSCALE",nsMeshSub:"WireGuard cifrado",
+  nsHostsN:n=>`${n} host públicos`,nsRulesN:n=>`${n} reglas`,nsDropN:n=>`${n} descartes`,
+  nsBypass:"sale hacia fuera · no pasa por nftables",
+  nsLOpen:"abiertos",nsLanOnly:"solo LAN",nsBlocked:"bloqueados",nsLoop:"loopback",
+  nsDocker:"docker",nsSvc:"servicios",nsCtn:"contenedores",
+  nsOwnPath:"salida propia a internet",nsViaMesh:"solo por la malla",
+  nsNoHub:"ninguna máquina local",nsDown:"bajada",nsUp:"subida",nsPorts:"puertos",
   vReplaceSoon:"CAMBIAR PRONTO",vReplaceNow:"CAMBIAR YA",
   io:"E/S",avg:"media",cover:"cobertura",ofMonth:"del mes",
   noData:"sin dato",screens:"Pantallas",
@@ -3038,13 +3093,7 @@ const T={
   nsCounts:(l,ta,d)=>`${l} sólo en localhost · ${ta} sólo tailnet · ${d} en red docker`,
   secNote:"Comprobado cada 60 s en esta máquina: la tabla nftables se lee del propio kernel (sudo de sólo lectura), firmas y escaneos de ClamAV de sus temporizadores systemd y los parches del temporizador de APT. Todo son unidades systemd habilitadas — sobreviven a reinicios; si algo deja de funcionar, esta pantalla y el aviso ⚠ de la cabecera lo marcan.",
   day:"día",days:"días",ago:x=>"hace "+x,loc:"es-ES"},
- en:{sc:["VITALS","SERVICES","POWER","SECURITY"],
-  tpTun:"CLOUDFLARE TUNNEL",tpHostsN:n=>`${n} public hostnames`,
-  tpMesh:"TAILSCALE",tpMeshSub:"WireGuard mesh · 100.x",
-  tpLan:"LAN",tpLanIso:"router isolates clients",
-  tpFwSub:n=>`default drop · ${n} rules`,tpBlockedN:n=>`${n} pkt blocked`,
-  tpOpen:"open",tpLanOnly:"LAN only",tpBlk:"blocked",
-  tpLoop:"localhost",tpDocker:"docker",tpCtn:"containers",
+ en:{sc:["VITALS","SERVICES","POWER","SECURITY","NETWORK"],
   cpu:"CPU",mem:"MEMORY",temp:"TEMPERATURE",net:"NETWORK",thermal:"THERMAL",
   svcOnline:"SERVICES ONLINE",system:"SYSTEM",disks:"DISKS",fleet:"FLEET",
   uptime:"UPTIME",load:"LOAD",memf:"MEM",disk:"DISK",containers:"CONTAINERS",
@@ -3075,6 +3124,13 @@ const T={
   rstAsk:n=>`Restart ${n}? The service will stop and start again.`,
   rstDone:n=>`${n} restarted`,logsBtn:"logs",close:"close",
   srvBusyOp:"an operation is already running on this service",
+  libBtn:"library",libRadarr:"movies",libSonarr:"shows",
+  libLoading:"loading…",libEmpty:"nothing here",libDelete:"delete",
+  libDelTitle:"delete permanently",
+  libDelAsk:n=>`Delete "${n}" and its files? This cannot be undone.`,
+  libDelOk:"delete",libDeleted:n=>`freed ${n}`,
+  libTorrentCleaned:"torrent cleaned up too",
+  libLocalOnly:"only available on the local network",
   st:{preparing:"preparing…",locating:"locating container…",pulling:"pulling image…",
       pulled:"image pulled",recreating:"recreating container…",starting:"starting service…",
       stopping:"stopping the old one…",uptodate:"already up to date",done:"done",failed:"error"},
@@ -3091,7 +3147,15 @@ const T={
   tariffAutoBody:"auto-detected from the system's timezone, not your real bill — correct it with a \"power\" key in config.json.",
   routeDown:"process healthy · public route down",
   approxCpu:"CPU approximate — derived from load average and core count, not measured",
-  vExcellent:"EXCELLENT",vGood:"GOOD",vWatch:"WATCH",
+  vExcellent:"EXCELLENT",vGood:"GOOD",vWatch:"WATCH",vUnknown:"NO DATA",
+  nsTitle:"Network surface",nsNet:"INTERNET",nsPublic:"public network",
+  nsTunnel:"CLOUDFLARE TUNNEL",nsMesh:"TAILSCALE MESH",nsMeshSub:"encrypted WireGuard",
+  nsHostsN:n=>`${n} public hosts`,nsRulesN:n=>`${n} rules`,nsDropN:n=>`${n} drops`,
+  nsBypass:"outbound-initiated · does not traverse nftables",
+  nsLOpen:"open",nsLanOnly:"LAN only",nsBlocked:"blocked",nsLoop:"loopback",
+  nsDocker:"docker",nsSvc:"services",nsCtn:"containers",
+  nsOwnPath:"own internet egress",nsViaMesh:"via mesh only",
+  nsNoHub:"no local machine",nsDown:"down",nsUp:"up",nsPorts:"ports",
   vReplaceSoon:"REPLACE SOON",vReplaceNow:"REPLACE NOW",
   io:"I/O",avg:"avg",cover:"coverage",ofMonth:"of the month",
   noData:"no data",screens:"Screens",
@@ -3140,13 +3204,14 @@ let L=initLang();
 const t=k=>{const v=T[L][k];return v===undefined?T.es[k]:v;};
 const catName=n=>{const m=T[L].catmap;return (m&&m[n])||n;};
 const VLABEL={excellent:"vExcellent",good:"vGood",watch:"vWatch",
-  replace_soon:"vReplaceSoon",replace_now:"vReplaceNow"};
+  replace_soon:"vReplaceSoon",replace_now:"vReplaceNow",unknown:"vUnknown"};
 const agoTxt=sec=>sec==null?"—":t("ago")(
   sec<90?Math.round(sec)+"s":sec<5400?Math.round(sec/60)+" min":
   sec<172800?Math.round(sec/3600)+" h":Math.round(sec/86400)+" d");
 let LABELS=T[L].sc;
-const VCOL={excellent:"up",good:"up",watch:"deg",replace_soon:"down",replace_now:"down"};
-const DOT={up:"up",deg:"degraded",down:"down"};
+const VCOL={excellent:"up",good:"up",watch:"deg",replace_soon:"down",replace_now:"down",
+  unknown:"na"};
+const DOT={up:"up",deg:"degraded",down:"down",na:"na"};
 let D=null;
 
 // year and week cases must exist or `uptime -p` past 7 days renders "1week1h13m"
@@ -3324,7 +3389,9 @@ function services(){
     `<span class="k"><i style="background:var(--mint)"></i><b>${s.online}</b> ${t("online")}</span>`+
     `<span class="k"><i style="background:var(--amber)"></i><b>${s.degraded}</b> ${nword(s.degraded,"degraded")}</span>`+
     `<span class="k"><i style="background:var(--red)"></i><b>${s.down}</b> ${nword(s.down,"down")}</span>`+
-    `<span class="meta"><b>${s.count}</b> ${t("inCats")} <b>${s.cats||order.length}</b> ${t("cats").toLowerCase()} · <b>${esc(s.ram||"—")}</b> ${t("ramNote")}</span></div>`;
+    `<span class="meta"><b>${s.count}</b> ${t("inCats")} <b>${s.cats||order.length}</b> ${t("cats").toLowerCase()} · <b>${esc(s.ram||"—")}</b> ${t("ramNote")}</span>`+
+    ((D.library_apps||[]).length?`<button class="bt libopen">${esc(t("libBtn"))}</button>`:"")+
+    `</div>`;
   if(!order.length)out+=`<div class="card">${t("noMachines")}</div>`;
   out+=`<div class="cats">`+order.map((n,i)=>{
     const cat=map[n],up=cat.svcs.filter(v=>v.status==="up").length,c=SPINE[i%SPINE.length];
@@ -3347,6 +3414,83 @@ function services(){
           `<span class="n">${nm}</span>${act}${upd}<span class="m">${esc(v.ram||"—")}</span></div>`;}).join("")+
       `</div>`;}).join("")+`</div>`;
   $("s-body").innerHTML=out;}
+
+// ---- media library cleanup (Sonarr/Radarr) ----
+// Browsing works over the tunnel like everything else (plain authed GET);
+// only POST /api/library/delete is local-network-only, enforced server-side
+// (403 outside the LAN) — libLocalOnly below just turns that into a clear
+// message instead of a generic error.
+const fmtB=b=>b==null?"—":b>=1024**3?(b/1024**3).toFixed(1)+"G":
+  b>=1024**2?(b/1024**2).toFixed(1)+"M":b>=1024?(b/1024).toFixed(1)+"K":b+"B";
+let libApp=null,libItems=[];
+function renderLibrary(loading,err){
+  const apps=D.library_apps||[];
+  // type="button" is REQUIRED on every control here: inside <form method=
+  // "dialog"> a bare <button> defaults to submit, which closes the dialog
+  const tabs=apps.length>1?`<div class="df" style="justify-content:flex-start">`+
+    apps.map(a=>`<button type="button" class="bt${a===libApp?" go":""}" data-libapp="${a}">${
+      esc(t(a==="radarr"?"libRadarr":"libSonarr"))}</button>`).join(" ")+`</div>`:"";
+  const body=loading?`<div class="db">${esc(t("libLoading"))}</div>`:
+    err?`<div class="db">${esc(err)}</div>`:
+    !libItems.length?`<div class="db">${esc(t("libEmpty"))}</div>`:
+    `<div class="libwrap"><table class="libt"><tbody>`+libItems.map(it=>
+      `<tr><td>${esc(it.title)}${it.year?` (${it.year})`:""}</td>`+
+      `<td class="r">${fmtB(it.size_bytes)}</td>`+
+      `<td><button type="button" class="bt libdel" data-id="${it.id}" `+
+      `aria-label="${esc(t("libDelete"))} ${esc(it.title)}">${esc(t("libDelete"))}</button></td></tr>`
+    ).join("")+`</tbody></table></div>`;
+  dlg.innerHTML=`<form method="dialog"><div class="dh">${esc(t("libBtn"))}</div>`+
+    tabs+body+
+    `<div class="df"><button class="bt go" value="ok">${esc(t("close"))}</button></div></form>`;}
+async function loadLibrary(){
+  renderLibrary(true);
+  try{
+    const r=await fetch(`/api/library?app=${encodeURIComponent(libApp)}`);
+    if(r.status===401)return expired();
+    if(!r.ok)return renderLibrary(false,await r.text());
+    libItems=(await r.json()).items||[];
+    renderLibrary(false);
+  }catch(err){renderLibrary(false,String(err));}}
+document.addEventListener("click",async e=>{
+  const open=e.target.closest&&e.target.closest("button.libopen");
+  if(open){
+    const apps=D.library_apps||[];
+    if(!apps.length)return;
+    if(!apps.includes(libApp))libApp=apps[0];
+    dlg.className="wide";renderLibrary(true);dlg.showModal();await loadLibrary();return;
+  }
+  const tab=e.target.closest&&e.target.closest("button[data-libapp]");
+  if(tab){libApp=tab.dataset.libapp;await loadLibrary();return;}
+  const del=e.target.closest&&e.target.closest("button.libdel");
+  if(!del||del.disabled)return;
+  const id=parseInt(del.dataset.id,10),item=libItems.find(x=>x.id===id);
+  if(!item)return;
+  // ask() reuses this same <dialog>, and showModal() on an open one throws.
+  // close() fires its close event ASYNCHRONOUSLY, so the wait below is not
+  // optional: without it that stale event lands on ask()'s own once-listener
+  // and resolves the confirm before the user ever sees it.
+  await new Promise(r=>{
+    if(!dlg.open)return r();
+    dlg.addEventListener("close",r,{once:true});dlg.close();});
+  const go=await ask(t("libDelTitle"),t("libDelAsk")(item.title),t("libDelOk"));
+  dlg.className="wide";renderLibrary(false);dlg.showModal();
+  if(!go)return;
+  // the re-render above detached `del`; disable the fresh node, not the old one
+  const btn=dlg.querySelector(`button.libdel[data-id="${id}"]`)||del;
+  btn.disabled=true;
+  try{
+    const r=await fetch("/api/library/delete",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({app:libApp,id})});
+    if(r.status===401)return expired();
+    if(r.status===403)return toast(t("libLocalOnly"),1);
+    if(!r.ok)return toast(await r.text(),1);
+    const res=await r.json();
+    toast(t("libDeleted")(fmtB(res.freed_bytes))+
+      (res.torrents_cleaned?` · ${t("libTorrentCleaned")}`:""));
+    await loadLibrary();
+  }catch(err){toast(String(err),1);}
+  finally{btn.disabled=false;}});
 
 // ================= 3 · CONSUMO =================
 function power(){
@@ -3495,14 +3639,12 @@ function security(){
       (pend.total&&pend.names&&pend.names.length?`<br><span style="color:var(--dim)">${
         pend.names.map(esc).join(" · ")}</span>`:"")):"",
     u.installed?line("",u.age_s!=null?esc(t("patchRun")(agoTxt(u.age_s))):esc(t("patchNoRun"))):""]);
-  // network map — the topology replaces the old surface card (user call):
-  // full-width, the per-port verdict rows ride beneath the diagram so no
-  // detail from the old card is lost
+  // The topology diagram moved to its own screen (5 · RED). What stays here is
+  // the per-port verdict table — a list, which this card does better than a picture.
   if(sf){
     const BW={open:t("nsOpen"),lan:t("nsLan"),blocked:t("nsBlock"),policy:t("nsBlock")};
     out+=`<div class="cat seccard" style="--cc:var(--cyan);grid-column:1/-1"><div class="cath"><i></i>`+
       `<span class="n">${t("netSurf")}</span><span class="c">${sf.public}</span></div>`+
-      `<div class="tmap">${topoSVG()}</div>`+
       `<div class="prows">`+
       (sf.rows||[]).map(r=>`<div class="prow"><span class="pp">${esc(r.port)}</span>`+
         `<span class="pn">${esc(r.name||r.proto)}</span>`+
@@ -3520,6 +3662,144 @@ function secBadge(){
   b.hidden=!lvl;
   b.className="tb secb"+(lvl==="down"?" bad":lvl==="degraded"?" warn":"");
   if(lvl)b.textContent=t("secBadge");}
+
+// ================= 5 · RED (network surface) =================
+// REBUILD-GATED. The SVG is animated, and a full innerHTML replace every 3s would
+// restart every CSS animation mid-flight (visible stutter). So the skeleton is
+// rebuilt ONLY when the topology itself changes — machines, their online state,
+// the firewall verdict set, the language — and every other tick just patches the
+// text nodes marked data-k. Steady state touches no SVG element at all.
+let nsUid=0;
+function netModel(){
+  const x=(D&&D.security)||{},sf=x.surface||{},fw=x.firewall||{},tun=x.tunnel||{};
+  const ms=(D&&D.machines)||[];
+  // authoritative: the server stamps local=true on the box netops runs on.
+  // Guessing by name picks the wrong hub the moment a machine is renamed.
+  const hub=ms.find(m=>m.local)||null;
+  const tunHosts=new Set((tun.hosts||[]).map(h=>h.host));
+  const others=ms.filter(m=>m!==hub).map(m=>{
+    const urls=[];(m.categories||[]).forEach(c=>(c.services||[]).forEach(s=>{
+      if(s.url)urls.push(s.url);}));
+    // a public hostname this machine serves that the hub's tunnel does NOT carry
+    // can only be reaching the internet by its own route
+    return {m,own:urls.filter(u=>!tunHosts.has(u))};});
+  const rows=sf.rows||[];
+  const sp=(D&&D.speed)||{};
+  return {hub,others,sf,fw,tun,rows,sp,
+    nOpen:rows.filter(r=>r.fw==="open").length,
+    nLan:rows.filter(r=>r.fw==="lan").length,
+    nBlk:rows.filter(r=>r.fw==="blocked"||r.fw==="policy").length+(sf.more||0)};}
+// structural only — nothing that merely ticks (load, rates, temps, counts)
+function netSig(o){
+  return [L,o.hub?o.hub.id:"-",o.fw.status||"-",
+    o.others.map(z=>z.m.id+":"+(((z.m.host||{}).online)?1:0)+":"+z.own.length).join(","),
+    (o.rows||[]).map(r=>r.port+r.fw).join(","),(o.tun.n||0)].join("|");}
+const nsSpeed=b=>b==null?"s1":b>=8e6?"s3":b>=1e6?"s2":"s1";
+function nsNode(x,y,w,h,title,sub,col,dim){
+  return`<g class="nsn${dim?" off":""}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="11"
+    fill="#0b1214" stroke="${col}" stroke-width="1.5"/>
+    <text x="${x+w/2}" y="${y+25}" text-anchor="middle" fill="${col}" class="nst">${esc(title)}</text>`+
+    sub.map((s,i)=>`<text x="${x+w/2}" y="${y+45+i*17}" text-anchor="middle" fill="${s.c||"#8fa9a2"}"
+      class="nss"${s.k?` data-k="${s.k}"`:""}>${esc(s.t)}</text>`).join("")+`</g>`;}
+function nsEdge(x1,y1,x2,y2,col,cls,bend){
+  const mx=(x1+x2)/2,by=bend==null?0:bend;
+  const d=`M${x1} ${y1} C${mx} ${y1+by} ${mx} ${y2+by} ${x2} ${y2}`;
+  return`<path d="${d}" fill="none" stroke="${col}" stroke-width="1.7" class="${cls}"/>`;}
+function netBuild(o){
+  const u=++nsUid,gid=`nsg${u}`;
+  const fwOk=o.fw.status==="up",fwCol=fwOk?"#5df2a0":"#ff6b6b";
+  const hubOn=o.hub&&(o.hub.host||{}).online,hubCol=hubOn?"#5df2a0":"#ff6b6b";
+  const dnCls="ns-flow "+nsSpeed(o.sp.down),upCls="ns-flow "+nsSpeed(o.sp.up);
+  let s=`<defs><linearGradient id="${gid}" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#a78bfa" stop-opacity=".9"/>
+    <stop offset="1" stop-color="#5df2a0" stop-opacity=".9"/></linearGradient></defs>`;
+  // ---- edges (drawn first, boxes paint over them) ----
+  // tunnel: cloudflared dials OUT and delivers to loopback, so it never crosses
+  // nftables. Routed ABOVE the barrier and labelled, because the old diagram drew
+  // it straight through the wall and implied the opposite.
+  s+=`<path d="M190 300 C300 300 300 96 470 96 L700 96 L700 150" fill="none"
+      stroke="url(#${gid})" stroke-width="2" class="${dnCls}"/>`;
+  s+=`<text x="492" y="84" fill="#a78bfa" class="nsl">${esc(t("nsBypass"))}</text>`;
+  // exposed path: the ports that really do face the internet, through the barrier
+  s+=nsEdge(190,320,470,300,fwOk?"#5df2a0":"#ff6b6b",upCls,0);
+  s+=nsEdge(548,300,700,300,fwOk?"#5df2a0":"#ff6b6b","ns-flow s1",0);
+  // mesh spine
+  s+=nsEdge(190,360,300,470,"#67e8f9","ns-flow s1",0);
+  o.others.forEach((z,i)=>{const on=(z.m.host||{}).online,y=140+i*160,cy=y+52;
+    // under the hub, never through it
+    s+=`<path d="M420 505 C640 562 820 566 958 566 L958 ${cy+16} Q958 ${cy} 980 ${cy}"
+      fill="none" stroke="${on?"#67e8f9":"#22383c"}" stroke-width="1.7"
+      class="${on?"ns-flow s1":"ns-dead"}"/>`;
+    // its OWN way out: independent of the hub's tunnel AND of its firewall.
+    // Own lane at x>1170 so it clears every machine box.
+    if(z.own.length){const lane=1178+i*8,top=16+i*11;
+      s+=`<path d="M115 262 C115 44 700 ${top} ${lane} ${top} L${lane} ${cy} L1170 ${cy}"
+        fill="none" stroke="#a78bfa" stroke-width="1.6"
+        class="${on?"ns-flow s2":"ns-dead"}"/>`;}});
+  // ---- nodes ----
+  s+=nsNode(40,262,150,76,t("nsNet"),[{t:t("nsPublic")}],"#8fa9a2");
+  s+=nsNode(250,58,220,76,t("nsTunnel"),
+    [{t:t("nsHostsN")(o.tun.n!=null?o.tun.n:"—"),c:"#a78bfa",k:"tunN"}],"#a78bfa");
+  s+=nsNode(250,440,220,76,t("nsMesh"),[{t:t("nsMeshSub"),c:"#67e8f9"}],"#67e8f9");
+  // firewall barrier
+  s+=`<rect x="490" y="150" width="58" height="330" rx="9" fill="#101a1c"
+    stroke="${fwCol}" stroke-width="1.5"/>
+    <text x="519" y="315" text-anchor="middle" fill="${fwCol}" class="nsfw"
+      transform="rotate(-90 519 315)">nftables</text>
+    <text x="519" y="140" text-anchor="middle" fill="#8fa9a2" class="nsl"
+      data-k="fwRules">${esc(t("nsRulesN")(o.fw.rules!=null?o.fw.rules:"—"))}</text>
+    <text x="519" y="500" text-anchor="middle" fill="#6f8c86" class="nsl"
+      data-k="fwBlocked">${esc(t("nsDropN")(o.fw.blocked!=null?num2(o.fw.blocked):"—"))}</text>`;
+  // hub
+  if(o.hub){
+    s+=`<rect x="700" y="150" width="250" height="300" rx="12" fill="#0c1315"
+      stroke="${hubCol}" stroke-width="1.6" class="${hubOn?"":"ns-pulse"}"/>
+      <text x="825" y="180" text-anchor="middle" fill="${hubCol}" class="nsh">${
+        esc(short(o.hub.name||"?").toUpperCase())}</text>
+      <text x="825" y="199" text-anchor="middle" fill="#6f8c86" class="nsl">${esc(o.hub.role||"")}</text>`;
+    const rowsL=[["nsLOpen","open","#5df2a0"],["nsLanOnly","lan","#67e8f9"],
+      ["nsBlocked","blk","#f5b544"],["nsLoop","loop","#6f8c86"],
+      ["nsDocker","dock","#6f8c86"],["nsSvc","svc","#8fa9a2"],["nsCtn","ctn","#8fa9a2"]];
+    rowsL.forEach((r,i)=>{const y=232+i*28;
+      s+=`<circle cx="722" cy="${y-4}" r="3.5" fill="${r[2]}"/>
+        <text x="736" y="${y}" fill="#8fa9a2" class="nss">${esc(t(r[0]))}</text>
+        <text x="930" y="${y}" text-anchor="end" fill="${r[2]}" class="nsv" data-k="${r[1]}">—</text>`;});
+  }else{
+    s+=`<text x="825" y="300" text-anchor="middle" fill="#ff6b6b" class="nsh">${esc(t("nsNoHub"))}</text>`;}
+  // remote machines
+  o.others.forEach((z,i)=>{const on=(z.m.host||{}).online,y=140+i*160;
+    const col=on?"#5df2a0":"#ff6b6b";
+    s+=nsNode(980,y,190,104,short(z.m.name||"?").toUpperCase(),
+      [{t:z.m.role||"",c:"#6f8c86"},
+       {t:"—",c:on?"#8fa9a2":"#ff6b6b",k:"m"+z.m.id},
+       {t:z.own.length?t("nsOwnPath"):t("nsViaMesh"),c:z.own.length?"#a78bfa":"#6f8c86"}],
+      col,!on);});
+  return`<div class="nswrap"><svg viewBox="0 0 1210 600" preserveAspectRatio="xMidYMid meet"
+    role="img" aria-label="${esc(t("nsTitle"))}">${s}</svg></div>`;}
+function netPatch(o){
+  const set=(k,v)=>{const e=$("n-body").querySelector(`[data-k="${k}"]`);
+    if(e)e.textContent=v;};
+  const hs=(o.hub&&o.hub.summary)||{};
+  set("tunN",t("nsHostsN")(o.tun.n!=null?o.tun.n:"—"));
+  set("fwRules",t("nsRulesN")(o.fw.rules!=null?o.fw.rules:"—"));
+  set("fwBlocked",t("nsDropN")(o.fw.blocked!=null?num2(o.fw.blocked):"—"));
+  set("open",o.nOpen);set("lan",o.nLan);set("blk",o.nBlk);
+  set("loop",o.sf.local!=null?o.sf.local:"—");
+  set("dock",o.sf.docker!=null?o.sf.docker:"—");
+  set("svc",`${hs.online!=null?hs.online:"—"}/${hs.count!=null?hs.count:"—"}`);
+  set("ctn",hs.containers!=null?hs.containers:"—");
+  o.others.forEach(z=>{const on=(z.m.host||{}).online,sm=z.m.summary||{};
+    set("m"+z.m.id,on?`${sm.online!=null?sm.online:"—"}/${sm.count!=null?sm.count:"—"} svc`
+                     :t("offline"));});}
+function netSurface(){
+  const host=$("n-body");if(!host)return;
+  const o=netModel(),sig=netSig(o);
+  if(host.dataset.nsSig!==sig){host.innerHTML=netBuild(o);host.dataset.nsSig=sig;}
+  netPatch(o);
+  const sp=o.sp,legend=[
+    `${t("nsDown")} ${rate(sp.down)}`,`${t("nsUp")} ${rate(sp.up)}`,
+    `${t("nsPorts")} ${o.nOpen+o.nLan+o.nBlk}`];
+  const el=$("n-legend");if(el)el.textContent=legend.join("  ·  ");}
 
 // ---------- swipe + dots ----------
 const track=$("screens");
@@ -3570,88 +3850,6 @@ track.addEventListener("keydown",e=>{
   if(e.key==="ArrowLeft"){e.preventDefault();goto(Math.max(0,cur-1));}});
 addEventListener("resize",()=>goto(cur));
 
-// ================= 5 · RED — live topology map =================
-// Hand-rolled SVG (no libs, same rule as the gauges): fixed column layout,
-// data-driven labels/colors. Internet enters twice — Cloudflare tunnel and
-// the Tailscale mesh — and the firewall is drawn as the barrier it is.
-function tnode(x,y,w,h,title,subs,accent,dim){
-  return`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" fill="#0c1315"
-      stroke="${accent}" stroke-width="1.4"${dim?' stroke-dasharray="5 4" opacity=".55"':''}/>`+
-    `<text x="${x+w/2}" y="${y+22}" text-anchor="middle" fill="${dim?"#6f8c86":accent}"
-      font-family="ui-monospace,monospace" font-size="12.5" font-weight="700" letter-spacing="2">${title}</text>`+
-    subs.map((s,i)=>`<text x="${x+w/2}" y="${y+40+i*15}" text-anchor="middle"
-      fill="${s.c||"#8fa9a2"}" font-family="ui-monospace,monospace" font-size="10.5">${s.t}</text>`).join("");}
-const tedge=(x1,y1,x2,y2,c,dash)=>{const mx=(x1+x2)/2;
-  return`<path d="M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" fill="none"
-    stroke="${c||"#22383c"}" stroke-width="1.6"${dash?' stroke-dasharray="4 5"':''}/>`;};
-
-function topoSVG(){
-  const x=(D&&D.security)||{},sf=x.surface||{},f=x.firewall||{},tn=x.tunnel;
-  const ms=(D&&D.machines)||[];
-  const hs=ms.find(m=>/home/i.test(m.id)||/home/i.test(short(m.name)))||ms[0]||{};
-  const others=ms.filter(m=>m!==hs);
-  const rows=sf.rows||[];
-  const nOpen=rows.filter(r=>r.fw==="open").length;
-  const nLan=rows.filter(r=>r.fw==="lan").length;
-  const nBlk=rows.filter(r=>r.fw==="blocked"||r.fw==="policy").length+(sf.more||0);
-  const openPorts=rows.filter(r=>r.fw==="open").map(r=>r.port).slice(0,8).join("  ");
-  const hsum=hs.summary||{},hon=(hs.host||{}).online;
-  let s="";
-  // edges first, boxes on top
-  s+=tedge(180,310,255,188,"#2a4a42");
-  s+=tedge(180,310,255,434,"#2a4a42");
-  s+=tedge(455,188,600,200,"#2fd98a");
-  s+=tedge(455,434,600,330,"#67e8f9");
-  others.slice(0,3).forEach((m,i)=>{const on=(m.host||{}).online;
-    s+=tedge(455,434,950,150+i*150+48,on?"#67e8f9":"#22383c",!on);});
-  s+=tedge(720,430,700,470,"#22383c");
-  s+=tnode(30,278,150,64,"INTERNET",[],"#8fa9a2");
-  s+=tnode(255,150,200,76,t("tpTun"),
-    [{t:esc(t("tpHostsN")(tn?tn.n:"—")),c:"#5df2a0"}],"#5df2a0");
-  s+=tnode(255,396,200,76,t("tpMesh"),[{t:esc(t("tpMeshSub"))}],"#67e8f9");
-  // firewall barrier
-  s+=`<rect x="505" y="120" width="42" height="380" rx="8" fill="#101a1c"
-      stroke="${f.status==="up"?"#5df2a0":"#ff6b6b"}" stroke-width="1.4"/>`+
-    `<text x="526" y="310" text-anchor="middle" fill="${f.status==="up"?"#5df2a0":"#ff6b6b"}"
-      transform="rotate(-90 526 310)" font-family="ui-monospace,monospace"
-      font-size="12" font-weight="700" letter-spacing="3">noxafw</text>`+
-    `<text x="526" y="108" text-anchor="middle" fill="#8fa9a2"
-      font-family="ui-monospace,monospace" font-size="10">${esc(t("tpFwSub")(f.rules!=null?f.rules:"—"))}</text>`+
-    `<text x="526" y="520" text-anchor="middle" fill="#6f8c86"
-      font-family="ui-monospace,monospace" font-size="10">${esc(t("tpBlockedN")(f.blocked!=null?num2(f.blocked):"—"))}</text>`;
-  // homeserver
-  const hc=hon?"#5df2a0":"#ff6b6b";
-  s+=`<rect x="600" y="110" width="270" height="320" rx="12" fill="#0c1315"
-      stroke="${hc}" stroke-width="1.6"/>`+
-    `<text x="735" y="138" text-anchor="middle" fill="${hc}" font-family="ui-monospace,monospace"
-      font-size="14" font-weight="700" letter-spacing="2.4">${esc(short(hs.name||"?").toUpperCase())}</text>`+
-    `<text x="735" y="156" text-anchor="middle" fill="#6f8c86" font-family="ui-monospace,monospace"
-      font-size="10">${esc(hs.role||"")}</text>`;
-  const hl=[[t("tpCtn"),hsum.containers!=null?hsum.containers:"—","#8fa9a2"],
-    ["svc",`${hsum.online!=null?hsum.online:"—"}/${hsum.count!=null?hsum.count:"—"}`,"#8fa9a2"],
-    [t("tpOpen"),nOpen,"#5df2a0"],[t("tpLanOnly"),nLan,"#67e8f9"],
-    [t("tpBlk"),nBlk,"#f5b544"],[t("tpLoop"),sf.local!=null?sf.local:"—","#6f8c86"],
-    [t("tpDocker"),sf.docker!=null?sf.docker:"—","#6f8c86"]];
-  hl.forEach((r,i)=>{const y=186+i*26;
-    s+=`<circle cx="622" cy="${y-4}" r="3.5" fill="${r[2]}"/>`+
-      `<text x="636" y="${y}" fill="#8fa9a2" font-family="ui-monospace,monospace" font-size="11">${esc(String(r[0]))}</text>`+
-      `<text x="848" y="${y}" text-anchor="end" fill="${r[2]}" font-family="ui-monospace,monospace"
-        font-size="12" font-weight="700">${esc(String(r[1]))}</text>`;});
-  if(openPorts)
-    s+=`<text x="735" y="416" text-anchor="middle" fill="#6f8c86"
-      font-family="ui-monospace,monospace" font-size="9.5">${esc(openPorts)}</text>`;
-  // LAN
-  s+=tnode(600,470,200,66,t("tpLan"),
-    [{t:"192.168.1.0/24"},{t:esc(t("tpLanIso")),c:"#6f8c86"}],"#8fa9a2");
-  // remote machines via the mesh
-  others.slice(0,3).forEach((m,i)=>{
-    const on=(m.host||{}).online,y=150+i*150,sum=m.summary||{};
-    s+=tnode(950,y,200,96,esc(short(m.name||"?").toUpperCase()),
-      [{t:esc(m.role||""),c:"#6f8c86"},
-       {t:on?`${sum.online!=null?sum.online:"—"}/${sum.count!=null?sum.count:"—"} svc`:t("offline"),
-        c:on?"#8fa9a2":"#ff6b6b"}],
-      on?"#5df2a0":"#ff6b6b",!on);});
-  return`<svg viewBox="0 0 1180 620" role="img" aria-label="${esc(t("netSurf"))}">${s}</svg>`;}
 const num2=n=>n>=1e6?(n/1e6).toFixed(1)+"M":Number(n).toLocaleString(t("loc"));
 
 // ---------- data ----------
@@ -3776,7 +3974,7 @@ const busy=()=>{
   return !!(a&&a!==track&&track.contains&&track.contains(a))||
          !!(sel&&!sel.isCollapsed&&sel.anchorNode&&track.contains&&track.contains(sel.anchorNode));};
 function paint(d,force){D=d;if(!force&&busy())return false;
-  vitals();services();power();security();secBadge();return true;}
+  vitals();services();power();security();netSurface();secBadge();return true;}
 // seq guard: a stalled response resolving after a newer one must not repaint
 // older data. The footer stamp moves only when the DOM actually repainted, so
 // a deferred (busy) or crashed render can't claim freshness; render errors go
@@ -3801,6 +3999,148 @@ setInterval(clock,1000);clock();setInterval(tick,__REFRESH__);tick();
 </script></body></html>"""
 
 
+
+
+# ---- media library cleanup (Sonarr/Radarr) -----------------------------------
+# Opt-in via config.json's "arr" key; absent = feature invisible, no crash.
+# Deletes an already-imported movie/show AND actually frees the disk space —
+# Radarr/Sonarr's own delete only removes ONE side of a hardlinked pair (this
+# box's qBittorrent downloads are hardlinked into the library — confirmed via
+# `stat`, link count 2), so the qBittorrent-side twin needs a separate,
+# best-effort cleanup pass below or the space never comes back.
+_ARR_APPS = ("sonarr", "radarr")
+QBIT_URL = "http://127.0.0.1:8081"   # same host as netops; pre-existing local auth bypass
+
+
+def _arr_conf(app):
+    c = (_CFG.get("arr") or {}).get(app)
+    return c if isinstance(c, dict) and c.get("url") and c.get("api_key") else None
+
+
+def _arr_call(app, path, method="GET"):
+    """One Sonarr/Radarr API call. Raises on any failure — callers decide
+    what that means for the response."""
+    c = _arr_conf(app)
+    if not c:
+        raise RuntimeError(f"{app} not configured")
+    req = urllib.request.Request(c["url"].rstrip("/") + path, method=method,
+                                 headers={"X-Api-Key": c["api_key"]})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        body = r.read()
+    return json.loads(body) if body else None
+
+
+def _arr_items(app):
+    """[{id,title,year,size_bytes,monitored,has_file}], sorted by size
+    descending, for the library dialog's list view. Sonarr rows are per
+    SERIES (a show is deleted as a whole, matching Sonarr's own delete)."""
+    if app == "radarr":
+        rows = _arr_call(app, "/api/v3/movie") or []
+        items = [{"id": m["id"], "title": m.get("title", "?"),
+                  "year": m.get("year"), "size_bytes": m.get("sizeOnDisk") or 0,
+                  "monitored": bool(m.get("monitored")),
+                  "has_file": bool(m.get("hasFile"))} for m in rows]
+    else:
+        rows = _arr_call(app, "/api/v3/series") or []
+        items = [{"id": s["id"], "title": s.get("title", "?"),
+                  "year": s.get("year"),
+                  "size_bytes": (s.get("statistics") or {}).get("sizeOnDisk") or 0,
+                  "monitored": bool(s.get("monitored")),
+                  "has_file": bool((s.get("statistics") or {}).get("episodeFileCount"))}
+                 for s in rows]
+    items.sort(key=lambda x: x["size_bytes"], reverse=True)
+    return items
+
+
+def _arr_item(app, item_id):
+    """{id,title,size_bytes,has_file,paths} for ONE item, fetched fresh right
+    before a delete (not the cached list). `paths`: every on-disk file for
+    this item — one for a movie, one per episode for a series, since
+    deleting a series removes all of them at once."""
+    kind = "movie" if app == "radarr" else "series"
+    d = _arr_call(app, f"/api/v3/{kind}/{item_id}")
+    if app == "radarr":
+        mf = d.get("movieFile") or {}
+        return {"id": d["id"], "title": d.get("title", "?"),
+                "size_bytes": d.get("sizeOnDisk") or 0,
+                "has_file": bool(d.get("hasFile")),
+                "paths": [mf["path"]] if mf.get("path") else []}
+    stats = d.get("statistics") or {}
+    has_file = bool(stats.get("episodeFileCount"))
+    paths = []
+    if has_file:
+        files = _arr_call(app, f"/api/v3/episodefile?seriesId={item_id}") or []
+        paths = [f["path"] for f in files if f.get("path")]
+    return {"id": d["id"], "title": d.get("title", "?"),
+            "size_bytes": stats.get("sizeOnDisk") or 0,
+            "has_file": has_file, "paths": paths}
+
+
+def _arr_delete(app, item_id):
+    """DELETE the item + its files in Radarr/Sonarr. Raises on failure."""
+    kind = "movie" if app == "radarr" else "series"
+    _arr_call(app, f"/api/v3/{kind}/{item_id}?deleteFiles=true", method="DELETE")
+
+
+def _find_hardlink_twins(target_ids, candidates):
+    """candidates: [(hash, path, file_id)] of qBittorrent's torrent files, where
+    file_id is (st_dev, st_ino) — the DEVICE matters: inode numbers repeat
+    across filesystems (qBittorrent sees both /media and /music), so matching
+    on inode alone would delete an unrelated torrent. -> {hash, ...}.
+
+    A torrent is only claimed when EVERY one of its files is being deleted.
+    One matching file is not enough: a multi-item pack shares a torrent with
+    media we are not deleting, and qBittorrent's delete takes the whole
+    torrent's files with it. Pure — tuple comparisons, no filesystem access.
+    """
+    targets = set(target_ids)
+    by_torrent = {}
+    for h, _, fid in candidates:
+        by_torrent.setdefault(h, []).append(fid)
+    return {h for h, fids in by_torrent.items()
+            if fids and all(f in targets for f in fids)}
+
+
+def _qbit_torrent_files():
+    """[(hash, path, (st_dev, st_ino))] for every file of every qBittorrent
+    torrent, best effort — an unreachable/misconfigured qBittorrent yields an
+    empty list rather than blocking the primary Radarr/Sonarr deletion."""
+    out = []
+    try:
+        req = urllib.request.Request(QBIT_URL + "/api/v2/torrents/info")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            torrents = json.loads(r.read())
+        for t in torrents:
+            h, save = t.get("hash"), t.get("save_path") or ""
+            if not h:
+                continue
+            try:
+                freq = urllib.request.Request(
+                    QBIT_URL + f"/api/v2/torrents/files?hash={h}")
+                with urllib.request.urlopen(freq, timeout=10) as fr:
+                    files = json.loads(fr.read())
+                for f in files:
+                    p = os.path.join(save, f.get("name", ""))
+                    try:
+                        st = os.stat(p)
+                        out.append((h, p, (st.st_dev, st.st_ino)))
+                    except OSError:
+                        # a file qBittorrent lists but we cannot stat stays in
+                        # the torrent's set as an unmatchable sentinel, so the
+                        # all()-match below refuses to claim that torrent
+                        out.append((h, p, None))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def _qbit_delete(h):
+    req = urllib.request.Request(
+        QBIT_URL + f"/api/v2/torrents/delete?hashes={h}&deleteFiles=true",
+        method="POST")
+    urllib.request.urlopen(req, timeout=10).read()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3877,6 +4217,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"ok": not problems, "problems": problems,
                                         "events": events}).encode(),
                        "application/json", nostore)
+        elif self.path.startswith("/api/library"):
+            if not self._authed():
+                return self._send(401, b"auth required", "text/plain", nostore)
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            app = qs.get("app", [""])[0]
+            if app not in _ARR_APPS:
+                return self._send(400, b"bad app", "text/plain", nostore)
+            if not _arr_conf(app):
+                return self._send(404, b"not configured", "text/plain", nostore)
+            try:
+                items = _arr_items(app)
+            except Exception as e:
+                return self._send(502, str(e).encode()[:300], "text/plain", nostore)
+            self._send(200, json.dumps({"items": items}).encode(),
+                       "application/json", nostore)
         elif self.path.startswith("/api/job"):
             if not self._authed():
                 return self._send(401, b"auth required", "text/plain", nostore)
@@ -3902,6 +4257,12 @@ class Handler(BaseHTTPRequestHandler):
         # client IP header (it can't be spoofed past the edge). Fall back to peer.
         return self.headers.get("CF-Connecting-IP") or self.client_address[0]
 
+    def _local_only(self):
+        # Same non-spoofable signal as _client_id: the header's presence means
+        # this request came through cloudflared, i.e. the public tunnel. Gates
+        # the media-library delete — reachable locally, never over the internet.
+        return not self.headers.get("CF-Connecting-IP")
+
     def do_POST(self):
         if self.path == "/api/login":
             return self._login()
@@ -3911,6 +4272,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._restart()
         if self.path == "/api/scan":
             return self._scan()
+        if self.path == "/api/library/delete":
+            return self._library_delete()
         if self.path == "/api/logout":
             return self._logout()
         return self._send(404, b"not found", "text/plain")
@@ -4090,6 +4453,72 @@ class Handler(BaseHTTPRequestHandler):
             pass
         self._send(202, b'{"ok":true}', "application/json",
                    (("Cache-Control", "no-store"),))
+
+    def _library_delete(self):
+        """Delete one movie/series (Radarr/Sonarr) AND its qBittorrent
+        hardlink twin if one is found — see the module-level comment on
+        _find_hardlink_twins for why the second half matters. Local-network
+        only: this never runs for a request that arrived through the public
+        tunnel, session or not."""
+        if not self._local_only():
+            return self._send(403, b"local network only", "text/plain")
+        if not self._authed():
+            return self._send(401, b"no session", "text/plain")
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return self._send(400, b"bad content-length", "text/plain")
+        if n < 0 or n > 64 * 1024:
+            return self._send(400, b"bad content-length", "text/plain")
+        try:
+            body = json.loads(self.rfile.read(n))
+        except Exception:
+            return self._send(400, b"bad json", "text/plain")
+        if not isinstance(body, dict):
+            return self._send(400, b"bad json", "text/plain")
+        app, item_id = body.get("app"), body.get("id")
+        if app not in _ARR_APPS or not isinstance(item_id, int) or isinstance(item_id, bool):
+            return self._send(400, b"bad app/id", "text/plain")
+        if not _arr_conf(app):
+            return self._send(404, b"not configured", "text/plain")
+        key = f"lib/{app}/{item_id}"
+        with _inflight_lock:
+            busy = key in _inflight
+            if not busy:
+                _inflight.add(key)
+        if busy:
+            return self._send(409, b"already running", "text/plain")
+        try:
+            try:
+                item = _arr_item(app, item_id)
+            except Exception as e:
+                return self._send(502, str(e).encode()[:300], "text/plain")
+            inos = set()
+            for p in item["paths"]:
+                try:
+                    st = os.stat(p)
+                    inos.add((st.st_dev, st.st_ino))
+                except OSError:
+                    pass
+            try:
+                _arr_delete(app, item_id)
+            except Exception as e:
+                return self._send(502, str(e).encode()[:300], "text/plain")
+            cleaned = 0
+            if inos:
+                try:
+                    for h in _find_hardlink_twins(inos, _qbit_torrent_files()):
+                        _qbit_delete(h)
+                        cleaned += 1
+                except Exception:
+                    pass  # primary delete already succeeded; report it as such
+            self._send(200, json.dumps({"deleted": True,
+                                        "freed_bytes": item["size_bytes"],
+                                        "torrents_cleaned": cleaned}).encode(),
+                       "application/json", (("Cache-Control", "no-store"),))
+        finally:
+            with _inflight_lock:
+                _inflight.discard(key)
 
     def log_message(self, *_):
         pass  # quiet
@@ -4523,6 +4952,35 @@ def _selftest():
     # not a value pinned in the test (that's env-dependent by design)
     assert _cost(1000.0)["day"] == round(24 * KWH_PRICE, 2)
     assert _cost(None) is None
+
+    # --- media library cleanup: config gating + the hardlink-matching logic ---
+    # _CFG is forced here: these must not depend on whether the REAL config.json
+    # happens to have an "arr" key (it does once the user configures the feature)
+    _cfg_save = _CFG
+    try:
+        _CFG = {}
+        assert _arr_conf("radarr") is None                 # no "arr" key -> disabled
+        _CFG = {"arr": {"radarr": {"url": "http://127.0.0.1:7878", "api_key": "x"},
+                        "sonarr": {"url": "http://127.0.0.1:8989"}}}
+        assert _arr_conf("radarr") is not None
+        assert _arr_conf("sonarr") is None                 # url without api_key -> unusable
+    finally:
+        _CFG = _cfg_save
+    # file ids are (st_dev, st_ino): the same inode number on a DIFFERENT device
+    # is a different file and must never match (h3 below)
+    _cands = [("h1", "/d/a.mkv", (1, 100)),
+              ("h2", "/d/b1.mkv", (1, 200)), ("h2", "/d/b2.mkv", (1, 201)),
+              ("h3", "/music/c.mkv", (9, 100))]
+    assert _find_hardlink_twins({(1, 100)}, _cands) == {"h1"}      # not h3
+    assert _find_hardlink_twins({(1, 200)}, _cands) == set()       # pack only half-matched
+    assert _find_hardlink_twins({(1, 200), (1, 201)}, _cands) == {"h2"}   # whole pack
+    assert _find_hardlink_twins({(9, 100)}, _cands) == {"h3"}
+    assert _find_hardlink_twins({(1, 999)}, _cands) == set()
+    assert _find_hardlink_twins(set(), _cands) == set()
+    assert _find_hardlink_twins({(1, 100)}, []) == set()
+    # an unstattable file (None) makes its torrent unclaimable, never claimable
+    assert _find_hardlink_twins({(1, 100)},
+                                [("h4", "/d/x", (1, 100)), ("h4", "/d/gone", None)]) == set()
 
     print("selftest ok")
 
