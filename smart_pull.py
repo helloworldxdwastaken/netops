@@ -61,12 +61,18 @@ SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
 
 
 def run(target, cmd, timeout=25):
-    """Remote command -> stdout, or "" on any failure. Never raises: a drive
-    report must never take down the cron chain that also feeds the local host."""
+    """Remote command -> stdout, whatever the exit status. Never raises.
+
+    Deliberately ignores returncode. smartctl sets bit 3 of its exit status when
+    the disk reports SMART FAILING, so gating on rc==0 would discard output in
+    exactly the case that must raise an alarm, and the drive would be reported as
+    having no data. smart_collect.py sidesteps the same trap with `|| true`.
+    Callers judge the CONTENT (valid JSON, no error-severity message), not the code.
+    """
     try:
         p = subprocess.run(SSH + [target, cmd], capture_output=True,
                            text=True, timeout=timeout)
-        return p.stdout if p.returncode == 0 else ""
+        return p.stdout
     except Exception:
         return ""
 
@@ -156,44 +162,16 @@ def build_drive(b, usage, smart):
                      "solo capacidad")
         return d
 
-    # full SMART: hand the parsed document to smart_collect's own extractor so
-    # the thresholds and wording stay identical to the local host's card
-    try:
-        sc.fill_from_smart(d, smart)
-    except AttributeError:
-        _fill_basic(d, smart)
-    v = sc.verdict(d)
-    d["verdict"], d["label"], d["note"] = v[0], v[1], v[2]
-    return d
-
-
-def _fill_basic(d, s):
-    """Minimal SMART extraction, used when smart_collect exposes no shared
-    helper. Covers both the NVMe log and the ATA attribute table."""
-    d["passed"] = (s.get("smart_status") or {}).get("passed")
-    d["temp"] = (s.get("temperature") or {}).get("current")
-    nv = s.get("nvme_smart_health_information_log") or {}
-    if nv:
-        d["hours"] = nv.get("power_on_hours")
-        d["wear"] = nv.get("percentage_used")
-        d["errors"] = nv.get("media_errors")
-        d["critical"] = bool(nv.get("critical_warning"))
-        if d["temp"] is None:
-            d["temp"] = nv.get("temperature")
-    else:
-        d["hours"] = (s.get("power_on_time") or {}).get("hours")
-        for a in ((s.get("ata_smart_attributes") or {}).get("table") or []):
-            raw = (a.get("raw") or {}).get("value")
-            n = a.get("name") or ""
-            if n == "Reallocated_Sector_Ct":
-                d["realloc"] = raw
-            elif n == "Current_Pending_Sector":
-                d["pending"] = raw
-            elif n == "Offline_Uncorrectable":
-                d["uncorrect"] = raw
-            elif "CRC" in n:
-                d["crc"] = raw
-    d["age"] = sc.human_age(d["hours"])
+    # Full SMART: hand the document to smart_collect's OWN parser so remote and
+    # local cards share one threshold implementation. parse_drive() keys ATA
+    # attributes by numeric id (vendors rename them: id 5 is
+    # "Reallocate_NAND_Blk_Cnt" on some SSDs) and, for NVMe, maps media_errors
+    # onto `uncorrect` and folds available_spare < threshold into `critical` -
+    # all signals verdict() actually reads. It sets verdict/label/note itself.
+    full = sc.parse_drive(smart, dict(b, use=use))
+    full.update({k: v for k, v in d.items()
+                 if k in ("used", "cap", "used_pct") and v is not None})
+    return full
 
 
 def merge(host_id, rec):

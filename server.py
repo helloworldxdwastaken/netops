@@ -2780,6 +2780,12 @@ a{color:inherit;text-decoration:none}
 .strip .meta{margin-left:auto;color:var(--txt2)}
 .strip .meta b{color:var(--txt);font-weight:700}
 .cats{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(310px,100%),1fr));gap:11px;align-items:start}
+/* SERVICIOS: cards differ wildly in height (1 service vs 8), and a grid row is as
+   tall as its tallest cell - so short cards left large holes. Columns pack them
+   tightly instead. Scoped, because .cats is also the SEGURIDAD container where a
+   card uses grid-column:1/-1, which is meaningless outside a grid. */
+.cats.flow{display:flex;align-items:flex-start;gap:11px}
+.cats.flow>.ncol{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:11px}
 .clgd{display:flex;flex-wrap:wrap;gap:12px;padding:5px 10px 8px}
 .clg{display:flex;align-items:center;gap:5px;font:600 10px/1 var(--mono);
   letter-spacing:1px;color:var(--txt2)}
@@ -3393,7 +3399,20 @@ function services(){
     ((D.library_apps||[]).length?`<button class="bt libopen">${esc(t("libBtn"))}</button>`:"")+
     `</div>`;
   if(!order.length)out+=`<div class="card">${t("noMachines")}</div>`;
-  out+=`<div class="cats">`+order.map((n,i)=>{
+  // Balance the category cards across columns by ESTIMATED height. A plain grid
+  // makes every row as tall as its tallest card, so a 1-service card left a large
+  // hole beside an 8-service one; CSS multi-column packs tightly but balances
+  // badly once break-inside:avoid forbids splitting a card. Filling the currently
+  // shortest column is deterministic and needs no DOM measurement, so it costs
+  // nothing on the 3s repaint.
+  const CW=($("s-body")||{}).clientWidth||document.body.clientWidth||1200;
+  const NCOL=Math.max(1,Math.min(4,Math.floor(CW/330)));
+  const est=nm=>46+(map[nm].svcs.length*26);
+  const ncols=Array.from({length:NCOL},()=>({h:0,names:[]}));
+  order.forEach(n=>{let t=ncols[0];
+    for(const c of ncols)if(c.h<t.h)t=c;
+    t.names.push(n);t.h+=est(n);});
+  const CARD=(n,i)=>{
     const cat=map[n],up=cat.svcs.filter(v=>v.status==="up").length,c=SPINE[i%SPINE.length];
     return`<div class="cat" style="--cc:${c}"><div class="cath"><i></i>`+
       `<span class="n">${esc(catName(n))}</span><span class="c">${up}/${cat.svcs.length}</span></div>`+
@@ -3412,7 +3431,10 @@ function services(){
         return`<div class="sv${upd?" hasupd":""}"${why?` title="${esc(why)}"`:""}>`+
           `<span class="d ${v.status}" role="img" aria-label="${esc((WORD()[v.status]||v.status)+(why?" · "+why:""))}">${GLY[v.status]||"●"}</span>`+
           `<span class="n">${nm}</span>${act}${upd}<span class="m">${esc(v.ram||"—")}</span></div>`;}).join("")+
-      `</div>`;}).join("")+`</div>`;
+      `</div>`;};
+  out+=`<div class="cats flow">`+ncols.map(c=>
+    `<div class="ncol">`+c.names.map(n=>CARD(n,order.indexOf(n))).join("")+`</div>`
+  ).join("")+`</div>`;
   $("s-body").innerHTML=out;}
 
 // ---- media library cleanup (Sonarr/Radarr) ----
@@ -3694,7 +3716,10 @@ function netSig(o){
   return [L,o.hub?o.hub.id:"-",o.fw.status||"-",
     o.others.map(z=>z.m.id+":"+(((z.m.host||{}).online)?1:0)+":"+z.own.length).join(","),
     (o.rows||[]).map(r=>r.port+r.fw).join(","),(o.tun.n||0)].join("|");}
-const nsSpeed=b=>b==null?"s1":b>=8e6?"s3":b>=1e6?"s2":"s1";
+// D.speed is Mbit/s (see the VITALS readout), NOT bytes/s. Three coarse tiers
+// on purpose: animation-duration is only changed when the tier changes, because
+// retargeting a running animation rescales its progress and the dashes jump.
+const nsSpeed=m=>m==null?"s1":m>=200?"s3":m>=25?"s2":"s1";
 function nsNode(x,y,w,h,title,sub,col,dim){
   return`<g class="nsn${dim?" off":""}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="11"
     fill="#0b1214" stroke="${col}" stroke-width="1.5"/>
@@ -3796,8 +3821,8 @@ function netSurface(){
   const o=netModel(),sig=netSig(o);
   if(host.dataset.nsSig!==sig){host.innerHTML=netBuild(o);host.dataset.nsSig=sig;}
   netPatch(o);
-  const sp=o.sp,legend=[
-    `${t("nsDown")} ${rate(sp.down)}`,`${t("nsUp")} ${rate(sp.up)}`,
+  const sp=o.sp,mbps=v=>v==null?"—":v.toFixed(0)+" Mb/s",legend=[
+    `${t("nsDown")} ${mbps(sp.down)}`,`${t("nsUp")} ${mbps(sp.up)}`,
     `${t("nsPorts")} ${o.nOpen+o.nLan+o.nBlk}`];
   const el=$("n-legend");if(el)el.textContent=legend.join("  ·  ");}
 
@@ -4500,18 +4525,28 @@ class Handler(BaseHTTPRequestHandler):
                     inos.add((st.st_dev, st.st_ino))
                 except OSError:
                     pass
+            # Decide the matches BEFORE the destructive step. Deleting the
+            # library file frees its inode, and the kernel reuses inode numbers,
+            # so enumerating afterwards can match an unrelated file that has
+            # since inherited the number - which we would then delete WITH its
+            # data. Capture first, act second.
+            twins = []
+            if inos:
+                try:
+                    twins = sorted(_find_hardlink_twins(inos, _qbit_torrent_files()))
+                except Exception:
+                    twins = []
             try:
                 _arr_delete(app, item_id)
             except Exception as e:
                 return self._send(502, str(e).encode()[:300], "text/plain")
             cleaned = 0
-            if inos:
+            for h in twins:
                 try:
-                    for h in _find_hardlink_twins(inos, _qbit_torrent_files()):
-                        _qbit_delete(h)
-                        cleaned += 1
+                    _qbit_delete(h)
+                    cleaned += 1
                 except Exception:
-                    pass  # primary delete already succeeded; report it as such
+                    pass  # the arr delete already succeeded; report what we did
             self._send(200, json.dumps({"deleted": True,
                                         "freed_bytes": item["size_bytes"],
                                         "torrents_cleaned": cleaned}).encode(),
